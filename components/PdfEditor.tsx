@@ -5,6 +5,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { TextItem, PageData } from "@/lib/types";
 import { loadPdf, renderPage } from "@/lib/pdf-renderer";
 import { applyEdits } from "@/lib/pdf-modifier";
+import { normalizePdfFontToToolbar, clampToToolbarFont } from "@/lib/font-utils";
 import Toolbar from "./Toolbar";
 import PdfPage from "./PdfPage";
 
@@ -139,6 +140,35 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     setSelectedItemId(id);
     if (id) setActiveTool("select");
   }, []);
+
+  // When selection changes, sync toolbar to the selected item's font/size/color
+  const getSelectedItem = useCallback(
+    (): TextItem | null => {
+      if (!selectedItemId) return null;
+      const fromNew = newItems.find((i) => i.id === selectedItemId);
+      if (fromNew) return fromNew;
+      const fromEdited = editedItems.get(selectedItemId);
+      if (fromEdited) return fromEdited;
+      for (const { pageData } of renderedPages) {
+        const fromPage = pageData.textItems.find((i) => i.id === selectedItemId);
+        if (fromPage) return fromPage;
+      }
+      return null;
+    },
+    [selectedItemId, newItems, editedItems, renderedPages]
+  );
+
+  useEffect(() => {
+    const item = getSelectedItem();
+    if (!item) return;
+    const { fontFamily: normalized, isBold: bold, isItalic: italic } =
+      normalizePdfFontToToolbar(item.fontFamily);
+    setFontSize(item.fontSize);
+    setFontFamily(clampToToolbarFont(normalized));
+    setFontColor(item.color);
+    setIsBold(item.isBold ?? bold);
+    setIsItalic(item.isItalic ?? italic);
+  }, [selectedItemId, getSelectedItem]);
 
   const handleDownload = useCallback(async () => {
     if (!pdf) return;

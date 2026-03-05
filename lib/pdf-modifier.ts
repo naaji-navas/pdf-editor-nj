@@ -8,6 +8,16 @@ function hexToRgb(hex: string) {
   return rgb(r, g, b);
 }
 
+const SERIF_KEYWORDS = [
+  "times", "georgia", "palatino", "garamond", "bookman", "century schoolbook",
+  "cambria", "baskerville", "didot", "bodoni", "hoefler", "lucida bright",
+  "ms serif", "liberation serif", "dejavu serif",
+];
+const MONO_KEYWORDS = [
+  "courier", "consolas", "monaco", "menlo", "andale mono", "letter gothic",
+  "liberation mono", "dejavu sans mono", "nimbus mono", "prestige",
+];
+
 function mapFontFamily(
   fontFamily: string,
   isBold?: boolean,
@@ -15,13 +25,16 @@ function mapFontFamily(
 ): keyof typeof StandardFonts {
   const lower = fontFamily.toLowerCase();
 
-  if (lower.includes("courier") || lower.includes("mono")) {
+  const isMono = MONO_KEYWORDS.some((k) => lower.includes(k));
+  const isSerif = SERIF_KEYWORDS.some((k) => lower.includes(k));
+
+  if (isMono) {
     if (isBold && isItalic) return "CourierBoldOblique";
     if (isBold) return "CourierBold";
     if (isItalic) return "CourierOblique";
     return "Courier";
   }
-  if (lower.includes("times") || lower.includes("serif")) {
+  if (isSerif) {
     if (isBold && isItalic) return "TimesRomanBoldItalic";
     if (isBold) return "TimesRomanBold";
     if (isItalic) return "TimesRomanItalic";
