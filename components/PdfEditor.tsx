@@ -300,8 +300,40 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         </div>
       </div>
 
-      <div className="flex h-8 items-center justify-center border-t border-gray-200 bg-white text-xs text-gray-400">
-        Made with love by <span className="ml-1 font-medium text-gray-500">Naaji</span>
+      <div className="flex h-10 items-center justify-center gap-3 border-t border-gray-200 bg-white text-xs text-gray-400">
+        <span>Made with love by <span className="font-medium text-gray-500">Naaji</span></span>
+        <span className="text-gray-200">|</span>
+        <a
+          href="https://www.linkedin.com/in/naaji-navas/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-[11px] font-medium text-[#0A66C2] transition-colors hover:text-[#004182]"
+        >
+          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+          </svg>
+          LinkedIn
+        </a>
+        <span className="text-gray-200">|</span>
+        <a
+          href="https://buymeacoffee.com/naaji"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 rounded-md bg-[#FFDD00] px-2 py-0.5 text-[11px] font-semibold text-gray-900 transition-colors hover:bg-[#FFCC00]"
+        >
+          <svg className="h-3.5 w-3.5" viewBox="0 0 884 1279" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M791.1 178.9H479.3l47.2-178.9h312.3l-47.7 178.9z" fill="#0D0C22"/>
+            <path d="m883.5 481.7-47.7 178.9H523.5l47.7-178.9h312.3z" fill="#0D0C22"/>
+            <path d="m328 1278.5-47.2-178.9h312.3l47.2 178.9H328z" fill="#0D0C22"/>
+            <path d="M640.3 1099.6H328l-47.2-178.9h312.3l47.2 178.9z" fill="#0D0C22"/>
+            <path d="M593.1 920.7H280.8L233.1 741h312.3l47.7 179.7z" fill="#0D0C22"/>
+            <path d="M545.4 741H233.1L186 562.1h312.3L545.4 741z" fill="#0D0C22"/>
+            <path d="M498.2 562.1H186L138.3 383.2h312.2l47.7 178.9z" fill="#0D0C22"/>
+            <path d="M450.5 383.2H138.3L91.1 204.3h312.2l47.2 178.9z" fill="#0D0C22"/>
+            <path d="M403.3 204.3H91.1L43.4 25.4h312.2l47.7 178.9z" fill="#0D0C22"/>
+          </svg>
+          Buy me a coffee
+        </a>
       </div>
 
       {downloading && (
