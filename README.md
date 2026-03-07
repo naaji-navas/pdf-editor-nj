@@ -22,8 +22,8 @@ A web-based PDF editor built with Next.js. Upload a PDF, view pages, edit or add
 
 1. **Clone the repo**
    ```bash
-   git clone https://github.com/naaji-navas/pdf-editor.git
-   cd pdf-editor
+   git clone https://github.com/naaji-navas/pdf-editor-nj.git
+   cd pdf-editor-nj
    ```
 
 2. **Install dependencies**
@@ -46,6 +46,23 @@ A web-based PDF editor built with Next.js. Upload a PDF, view pages, edit or add
 | `npm run build` | Build for production        |
 | `npm run start` | Start production server     |
 | `npm run lint`  | Run ESLint                  |
+
+## Contributing
+
+If you wish to contribute, please feel free to fork the repo and submit a pull request. Bug reports, feature suggestions, and improvements are all welcome.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/your-feature`)
+3. Commit your changes (`git commit -m 'Add your feature'`)
+4. Push to the branch (`git push origin feature/your-feature`)
+5. Open a Pull Request
+
+## Support
+
+If you find this project useful, consider supporting me:
+
+- [Buy me a coffee](https://buymeacoffee.com/naaji)
+- [Connect on LinkedIn](https://www.linkedin.com/in/naaji-navas/)
 
 ## License
 
