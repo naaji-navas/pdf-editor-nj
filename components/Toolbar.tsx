@@ -1,9 +1,12 @@
 "use client";
 
+import { Fragment, type ReactNode } from "react";
+import type { Tool } from "@/lib/types";
+
 interface ToolbarProps {
   fileName: string;
-  activeTool: "select" | "text";
-  onToolChange: (tool: "select" | "text") => void;
+  activeTool: Tool;
+  onToolChange: (tool: Tool) => void;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
   fontFamily: string;
@@ -14,6 +17,8 @@ interface ToolbarProps {
   onBoldChange: (bold: boolean) => void;
   isItalic: boolean;
   onItalicChange: (italic: boolean) => void;
+  coloroutColor: string;
+  onColoroutColorChange: (color: string) => void;
   scale: number;
   onScaleChange: (scale: number) => void;
   onDownload: () => void;
@@ -80,6 +85,49 @@ const FONT_FAMILIES = [
 
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 72];
 
+const TOOLS: { tool: Tool; label: string; title: string; icon: ReactNode }[] = [
+  {
+    tool: "select",
+    label: "Select",
+    title: "Select & Edit (V)",
+    icon: (
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.042 21.672 13.684 16.6m0 0-2.51 2.225.569-9.47 5.227 7.917-3.286-.672ZM12 2.25V4.5m5.834.166-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243-1.59-1.59" />
+      </svg>
+    ),
+  },
+  {
+    tool: "text",
+    label: "Text",
+    title: "Add Text (T)",
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M5 4v3h5.5v12h3V7H19V4H5z" />
+      </svg>
+    ),
+  },
+  {
+    tool: "colorout",
+    label: "Color-out",
+    title: "Color-out: drag to cover an area (W)",
+    icon: (
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <rect x="4" y="6" width="16" height="12" rx="1.5" strokeDasharray="3 2" />
+      </svg>
+    ),
+  },
+  {
+    tool: "crop",
+    label: "Crop",
+    title: "Crop: drag to select the area to keep (C)",
+    icon: (
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14" />
+      </svg>
+    ),
+  },
+];
+
 export default function Toolbar({
   fileName,
   activeTool,
@@ -94,6 +142,8 @@ export default function Toolbar({
   onBoldChange,
   isItalic,
   onItalicChange,
+  coloroutColor,
+  onColoroutColorChange,
   scale,
   onScaleChange,
   onDownload,
@@ -118,35 +168,40 @@ export default function Toolbar({
 
       <div className="mx-2 h-6 w-px bg-gray-200" />
 
-      <button
-        onClick={() => onToolChange("select")}
-        className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm font-medium transition-colors ${
-          activeTool === "select"
-            ? "bg-blue-100 text-blue-700"
-            : "text-gray-600 hover:bg-gray-100"
-        }`}
-        title="Select & Edit (V)"
-      >
-        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15.042 21.672 13.684 16.6m0 0-2.51 2.225.569-9.47 5.227 7.917-3.286-.672ZM12 2.25V4.5m5.834.166-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243-1.59-1.59" />
-        </svg>
-        Select
-      </button>
+      {TOOLS.map(({ tool, label, title, icon }) => (
+        <Fragment key={tool}>
+          <button
+            onClick={() => onToolChange(tool)}
+            className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm font-medium transition-colors ${
+              activeTool === tool
+                ? "bg-blue-100 text-blue-700"
+                : "text-gray-600 hover:bg-gray-100"
+            }`}
+            title={title}
+          >
+            {icon}
+            {label}
+          </button>
 
-      <button
-        onClick={() => onToolChange("text")}
-        className={`flex h-8 items-center gap-1.5 rounded-lg px-3 text-sm font-medium transition-colors ${
-          activeTool === "text"
-            ? "bg-blue-100 text-blue-700"
-            : "text-gray-600 hover:bg-gray-100"
-        }`}
-        title="Add Text (T)"
-      >
-        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M5 4v3h5.5v12h3V7H19V4H5z" />
-        </svg>
-        Text
-      </button>
+          {tool === "colorout" && (
+            <label
+              className="relative -ml-1 flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg hover:bg-gray-100"
+              title="Color-out fill color"
+            >
+              <input
+                type="color"
+                value={coloroutColor}
+                onChange={(e) => onColoroutColorChange(e.target.value)}
+                className="absolute inset-0 h-8 w-8 cursor-pointer opacity-0"
+              />
+              <div
+                className="h-4 w-4 rounded border border-gray-300 shadow-inner"
+                style={{ backgroundColor: coloroutColor }}
+              />
+            </label>
+          )}
+        </Fragment>
+      ))}
 
       <div className="mx-2 h-6 w-px bg-gray-200" />
 

@@ -2,17 +2,60 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import type { TextItem, PageData } from "@/lib/types";
+import type { TextItem, PageData, Rect, Tool, ColoroutBox } from "@/lib/types";
 import { loadPdf, renderPage } from "@/lib/pdf-renderer";
 import { applyEdits } from "@/lib/pdf-modifier";
 import { normalizePdfFontToToolbar, clampToToolbarFont } from "@/lib/font-utils";
 import Toolbar from "./Toolbar";
-import PdfPage from "./PdfPage";
+import PdfPage, { cropId } from "./PdfPage";
 
 interface PdfEditorProps {
   pdfData: ArrayBuffer;
   fileName: string;
   onBack: () => void;
+}
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName?: string;
+    types?: { description: string; accept: Record<string, string[]> }[];
+  }) => Promise<FileSystemFileHandle>;
+};
+
+const DOWNLOAD_FRAME = "pdf-download-frame";
+
+// A real HTTP attachment download; blob-URL downloads stall as "Unconfirmed" in some browsers
+function submitDownloadForm(blob: Blob, fileName: string) {
+  let frame = document.querySelector<HTMLIFrameElement>(`iframe[name="${DOWNLOAD_FRAME}"]`);
+  if (!frame) {
+    frame = document.createElement("iframe");
+    frame.name = DOWNLOAD_FRAME;
+    frame.hidden = true;
+    document.body.appendChild(frame);
+  }
+
+  const files = new DataTransfer();
+  files.items.add(new File([blob], fileName, { type: "application/pdf" }));
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.name = "file";
+  fileInput.files = files.files;
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "hidden";
+  nameInput.name = "name";
+  nameInput.value = fileName;
+
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = "/api/download";
+  form.enctype = "multipart/form-data";
+  form.target = DOWNLOAD_FRAME;
+  form.hidden = true;
+  form.append(fileInput, nameInput);
+  document.body.appendChild(form);
+  form.submit();
+  form.remove();
 }
 
 interface RenderedPage {
@@ -28,14 +71,17 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
 
   const [editedItems, setEditedItems] = useState<Map<string, TextItem>>(new Map());
   const [newItems, setNewItems] = useState<TextItem[]>([]);
+  const [colorouts, setColorouts] = useState<ColoroutBox[]>([]);
+  const [crops, setCrops] = useState<Map<number, Rect>>(new Map());
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
-  const [activeTool, setActiveTool] = useState<"select" | "text">("select");
+  const [activeTool, setActiveTool] = useState<Tool>("select");
   const [fontSize, setFontSize] = useState(14);
   const [fontFamily, setFontFamily] = useState("Helvetica");
   const [fontColor, setFontColor] = useState("#000000");
   const [isBold, setIsBold] = useState(false);
   const [isItalic, setIsItalic] = useState(false);
+  const [coloroutColor, setColoroutColor] = useState("#ffffff");
   const [scale, setScale] = useState(1.5);
   const [downloading, setDownloading] = useState(false);
 
@@ -121,9 +167,64 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         next.delete(id);
         return next;
       });
+      setColorouts((prev) => prev.filter((box) => box.id !== id));
+      setCrops((prev) => {
+        const pageIndex = [...prev.keys()].find((i) => cropId(i) === id);
+        if (pageIndex === undefined) return prev;
+        const next = new Map(prev);
+        next.delete(pageIndex);
+        return next;
+      });
       if (selectedItemId === id) setSelectedItemId(null);
     },
     [selectedItemId]
+  );
+
+  const handleAddColorout = useCallback((box: ColoroutBox) => {
+    setColorouts((prev) => [...prev, box]);
+  }, []);
+
+  const handleUpdateColorout = useCallback((id: string, rect: Rect) => {
+    setColorouts((prev) => prev.map((box) => (box.id === id ? { ...box, ...rect } : box)));
+  }, []);
+
+  const handleColoroutColorChange = useCallback(
+    (color: string) => {
+      setColoroutColor(color);
+      setColorouts((prev) =>
+        prev.map((box) => (box.id === selectedItemId ? { ...box, color } : box))
+      );
+    },
+    [selectedItemId]
+  );
+
+  const handleSetCrop = useCallback((pageIndex: number, rect: Rect | null) => {
+    setCrops((prev) => {
+      const next = new Map(prev);
+      if (rect) next.set(pageIndex, rect);
+      else next.delete(pageIndex);
+      return next;
+    });
+  }, []);
+
+  const handleApplyCropToAll = useCallback(
+    (rect: Rect) => {
+      const next = new Map<number, Rect>();
+      for (const { pageData } of renderedPages) {
+        const pageWidth = pageData.width / scale;
+        const pageHeight = pageData.height / scale;
+        const x = Math.min(rect.x, pageWidth - 1);
+        const y = Math.min(rect.y, pageHeight - 1);
+        next.set(pageData.pageIndex, {
+          x,
+          y,
+          width: Math.min(rect.width, pageWidth - x),
+          height: Math.min(rect.height, pageHeight - y),
+        });
+      }
+      setCrops(next);
+    },
+    [renderedPages, scale]
   );
 
   const handleMoveItem = useCallback((id: string, x: number, y: number) => {
@@ -159,6 +260,13 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   );
 
   useEffect(() => {
+    const box = colorouts.find((b) => b.id === selectedItemId);
+    if (box) setColoroutColor(box.color);
+    // Only sync on selection change, not on every colorout move/resize
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedItemId]);
+
+  useEffect(() => {
     const item = getSelectedItem();
     if (!item) return;
     const { fontFamily: normalized, isBold: bold, isItalic: italic } =
@@ -171,7 +279,24 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   }, [selectedItemId, getSelectedItem]);
 
   const handleDownload = useCallback(async () => {
-    if (!pdf) return;
+    if (!pdf || downloading) return;
+    const downloadName = `${fileName.replace(/\.pdf$/i, "")}-edited.pdf`;
+
+    // Must be opened before any await so it still counts as part of the click
+    let fileHandle: FileSystemFileHandle | null = null;
+    const picker = (window as SaveFilePickerWindow).showSaveFilePicker;
+    if (picker) {
+      try {
+        fileHandle = await picker({
+          suggestedName: downloadName,
+          types: [{ description: "PDF document", accept: { "application/pdf": [".pdf"] } }],
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        fileHandle = null;
+      }
+    }
+
     try {
       setDownloading(true);
       const modifiedBytes = await applyEdits(
@@ -179,31 +304,38 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         renderedPages.map((p) => p.pageData),
         editedItems,
         newItems,
-        scale
+        scale,
+        colorouts,
+        crops
       );
-
       const blob = new Blob([new Uint8Array(modifiedBytes) as BlobPart], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const baseName = fileName.replace(/\.pdf$/i, "");
-      a.download = `${baseName}-edited.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+
+      if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+      }
+
+      submitDownloadForm(blob, downloadName);
     } catch (err) {
       console.error("Download failed:", err);
+      const reason = err instanceof Error ? err.message : String(err);
+      alert(`Failed to generate the PDF.\n\n${reason}`);
     } finally {
       setDownloading(false);
     }
-  }, [pdf, renderedPages, editedItems, newItems, scale, fileName]);
+  }, [pdf, downloading, renderedPages, editedItems, newItems, scale, colorouts, crops, fileName]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "v" || e.key === "V") setActiveTool("select");
-      if (e.key === "t" || e.key === "T") setActiveTool("text");
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "v") setActiveTool("select");
+      if (key === "t") setActiveTool("text");
+      if (key === "w") setActiveTool("colorout");
+      if (key === "c") setActiveTool("crop");
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedItemId) handleDeleteItem(selectedItemId);
       }
@@ -213,7 +345,8 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedItemId, handleDeleteItem]);
 
-  const hasEdits = editedItems.size > 0 || newItems.length > 0;
+  const hasEdits =
+    editedItems.size > 0 || newItems.length > 0 || colorouts.length > 0 || crops.size > 0;
 
   if (loading) {
     return (
@@ -266,6 +399,8 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         onBoldChange={setIsBold}
         isItalic={isItalic}
         onItalicChange={setIsItalic}
+        coloroutColor={coloroutColor}
+        onColoroutColorChange={handleColoroutColorChange}
         scale={scale}
         onScaleChange={setScale}
         onDownload={handleDownload}
@@ -282,6 +417,8 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
               canvasDataUrl={page.canvasDataUrl}
               editedItems={editedItems}
               newItems={newItems}
+              colorouts={colorouts.filter((box) => box.pageIndex === page.pageData.pageIndex)}
+              crop={crops.get(page.pageData.pageIndex) ?? null}
               selectedItemId={selectedItemId}
               activeTool={activeTool}
               scale={scale}
@@ -290,11 +427,16 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
               fontColor={fontColor}
               isBold={isBold}
               isItalic={isItalic}
+              coloroutColor={coloroutColor}
               onSelectItem={handleSelectItem}
               onEditItem={handleEditItem}
               onDeleteItem={handleDeleteItem}
               onMoveItem={handleMoveItem}
               onAddNewText={handleAddNewText}
+              onAddColorout={handleAddColorout}
+              onUpdateColorout={handleUpdateColorout}
+              onSetCrop={handleSetCrop}
+              onApplyCropToAll={handleApplyCropToAll}
             />
           ))}
         </div>

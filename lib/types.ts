@@ -15,6 +15,22 @@ export interface TextItem {
   isItalic?: boolean;
 }
 
+export type Tool = "select" | "text" | "colorout" | "crop";
+
+/** In PDF points, relative to the top-left of the rendered page. */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ColoroutBox extends Rect {
+  id: string;
+  pageIndex: number;
+  color: string;
+}
+
 export interface PageData {
   pageIndex: number;
   width: number;
@@ -28,7 +44,7 @@ export interface EditorState {
   editedItems: Map<string, TextItem>;
   newItems: TextItem[];
   selectedItemId: string | null;
-  activeTool: "select" | "text";
+  activeTool: Tool;
   fontSize: number;
   fontFamily: string;
   fontColor: string;

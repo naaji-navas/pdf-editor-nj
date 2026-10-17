@@ -1,5 +1,5 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import type { TextItem, PageData } from "./types";
+import { PDFDocument, StandardFonts, rgb } from "@cantoo/pdf-lib";
+import type { TextItem, PageData, Rect, ColoroutBox } from "./types";
 
 function hexToRgb(hex: string) {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -47,17 +47,49 @@ function mapFontFamily(
   return "Helvetica";
 }
 
+const CHAR_FALLBACKS: Record<string, string> = {
+  "₹": "Rs.", "→": "->", "←": "<-", "≤": "<=", "≥": ">=", "≠": "!=", "✓": "v", "✔": "v",
+  "\u00a0": " ", "\u2002": " ", "\u2003": " ", "\u2009": " ", "\t": " ",
+};
+
 export async function applyEdits(
   originalPdfBytes: ArrayBuffer,
   pages: PageData[],
   editedItems: Map<string, TextItem>,
   newItems: TextItem[],
-  scale: number
+  scale: number,
+  colorouts: ColoroutBox[] = [],
+  crops: Map<number, Rect> = new Map()
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(originalPdfBytes);
+  let pdfDoc: PDFDocument;
+  try {
+    // Empty password decrypts owner-password-only PDFs (open without a password but block editing)
+    pdfDoc = await PDFDocument.load(originalPdfBytes, { password: "" });
+  } catch (err) {
+    if (err instanceof Error && /encrypt|password/i.test(err.message)) {
+      throw new Error("This PDF is password-protected, so it can't be modified. Remove the password and try again.");
+    }
+    throw err;
+  }
   const pdfPages = pdfDoc.getPages();
 
-  const fontCache: Record<string, Awaited<ReturnType<typeof pdfDoc.embedFont>>> = {};
+  // Editor rects are top-left based and relative to the visible (crop) box
+  const visibleBoxes = pdfPages.map((page) => page.getCropBox());
+  const toPdfRect = (pageIndex: number, r: Rect) => {
+    const box = visibleBoxes[pageIndex];
+    return { x: box.x + r.x, y: box.y + box.height - r.y - r.height, width: r.width, height: r.height };
+  };
+
+  for (const box of colorouts) {
+    if (box.pageIndex >= pdfPages.length) continue;
+    pdfPages[box.pageIndex].drawRectangle({
+      ...toPdfRect(box.pageIndex, box),
+      color: hexToRgb(box.color ?? "#ffffff"),
+    });
+  }
+
+  type EmbeddedFont = Awaited<ReturnType<typeof pdfDoc.embedFont>>;
+  const fontCache: Record<string, EmbeddedFont> = {};
 
   async function getFont(family: string, bold?: boolean, italic?: boolean) {
     const key = mapFontFamily(family, bold, italic);
@@ -65,6 +97,22 @@ export async function applyEdits(
       fontCache[key] = await pdfDoc.embedFont(StandardFonts[key]);
     }
     return fontCache[key];
+  }
+
+  // Standard fonts only cover WinAnsi; drawText throws on anything else
+  const charsetCache = new Map<EmbeddedFont, Set<number>>();
+  function toEncodable(text: string, font: EmbeddedFont) {
+    let charset = charsetCache.get(font);
+    if (!charset) {
+      charset = new Set(font.getCharacterSet());
+      charsetCache.set(font, charset);
+    }
+    let out = "";
+    for (const ch of text) {
+      if (ch === "\n" || charset.has(ch.codePointAt(0)!)) out += ch;
+      else out += CHAR_FALLBACKS[ch] ?? "?";
+    }
+    return out;
   }
 
   for (const [, item] of editedItems) {
@@ -86,7 +134,7 @@ export async function applyEdits(
     });
 
     const font = await getFont(item.fontFamily, item.isBold, item.isItalic);
-    page.drawText(item.text, {
+    page.drawText(toEncodable(item.text, font), {
       x: pdfX,
       y: pdfY,
       size: item.fontSize,
@@ -104,13 +152,20 @@ export async function applyEdits(
     const pdfY = pageHeight - item.y / scale - item.fontSize;
 
     const font = await getFont(item.fontFamily, item.isBold, item.isItalic);
-    page.drawText(item.text, {
+    page.drawText(toEncodable(item.text, font), {
       x: pdfX,
       y: pdfY,
       size: item.fontSize,
       font,
       color: hexToRgb(item.color),
     });
+  }
+
+  for (const [pageIndex, rect] of crops) {
+    if (pageIndex >= pdfPages.length) continue;
+    const { x, y, width, height } = toPdfRect(pageIndex, rect);
+    pdfPages[pageIndex].setMediaBox(x, y, width, height);
+    pdfPages[pageIndex].setCropBox(x, y, width, height);
   }
 
   return pdfDoc.save();
