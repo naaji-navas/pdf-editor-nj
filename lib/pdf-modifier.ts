@@ -139,6 +139,8 @@ export async function applyEdits(
       size: style.fontSize,
       color: style.color ? hexToTuple(style.color) : undefined,
       forceFallback: style.fontFamily !== undefined || style.bold !== undefined || style.italic !== undefined,
+      dx: edit.dx,
+      dy: edit.dy !== undefined ? -edit.dy : undefined,
     });
     editsByPage.set(run.pageIndex, list);
   }
@@ -231,7 +233,7 @@ export async function applyEdits(
       ...edit.style,
     };
     const font = await getFont(style.fontFamily, style.bold, style.italic);
-    const base = toPdfPoint(run.pageIndex, run.x, run.y + run.fontSize);
+    const base = toPdfPoint(run.pageIndex, run.x + (edit.dx ?? 0), run.y + (edit.dy ?? 0) + run.fontSize);
     page.drawText(toEncodable(edit.text, font), {
       x: base.x, y: base.y, size: style.fontSize, font, color: hexToRgb(style.color),
     });

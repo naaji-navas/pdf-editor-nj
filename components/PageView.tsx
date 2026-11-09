@@ -25,6 +25,7 @@ export interface PageActions {
   select: (selection: Selection) => void;
   setEditing: (id: string | null) => void;
   commitRunText: (run: TextRun, text: string) => void;
+  moveRun: (run: TextRun, dx: number, dy: number, gesture?: string) => void;
   commitObjectText: (id: string, text: string) => void;
   updateObject: (id: string, patch: object, gesture?: string) => void;
   addObject: (obj: PageObject, startEditing?: boolean) => void;
@@ -207,38 +208,31 @@ export default function PageView({
       )}
 
       {near &&
-        runs?.map((run) =>
-          editingId === run.id ? (
-            <RunEditor key={run.id} run={run} value={doc.textEdits[run.id]?.text ?? run.text} scale={scale} actions={actions} />
+        runs?.map((run) => {
+          const edit = doc.textEdits[run.id];
+          const offset = { x: edit?.dx ?? 0, y: edit?.dy ?? 0 };
+          return editingId === run.id ? (
+            <RunEditor key={run.id} run={run} offset={offset} value={edit?.text ?? run.text} scale={scale} actions={actions} />
           ) : (
-            <div
+            <RunHitbox
               key={run.id}
-              className={`absolute rounded-[2px] ${interactive ? "cursor-text" : "pointer-events-none"} ${
-                isSelected(selection, "run", run.id)
-                  ? "bg-blue-500/10 outline outline-2 outline-blue-500"
-                  : interactive
-                    ? "hover:bg-blue-500/5 hover:outline hover:outline-1 hover:outline-blue-300"
-                    : ""
-              }`}
-              style={{ left: run.x * scale, top: run.y * scale, width: run.width * scale, height: run.height * scale, zIndex: 10 }}
-              title="Double-click to edit"
-              onClick={(e) => {
-                e.stopPropagation();
-                actions.select({ type: "run", id: run.id });
-              }}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                actions.select({ type: "run", id: run.id });
-                actions.setEditing(run.id);
-              }}
+              run={run}
+              offset={offset}
+              scale={scale}
+              bounds={bounds}
+              imageUrl={imageUrl}
+              selected={isSelected(selection, "run", run.id)}
+              interactive={interactive}
+              actions={actions}
             />
-          )
-        )}
+          );
+        })}
 
       {hits.map((hit) => {
         const run = runById.get(hit.runId);
         if (!run) return null;
-        const text = doc.textEdits[run.id]?.text ?? run.text;
+        const edit = doc.textEdits[run.id];
+        const text = edit?.text ?? run.text;
         const style = { fontFamily: run.fontFamily, fontSize: run.fontSize, bold: false, italic: false };
         const ratio = run.width / Math.max(1, textWidth(text, style));
         const start = textWidth(text.slice(0, hit.start), style) * ratio;
@@ -248,8 +242,8 @@ export default function PageView({
             key={hit.key}
             className={`pointer-events-none absolute rounded-[2px] ${hit.key === activeHit ? "bg-orange-400/50" : "bg-yellow-300/50"}`}
             style={{
-              left: (run.x + start) * scale,
-              top: run.y * scale,
+              left: (run.x + (edit?.dx ?? 0) + start) * scale,
+              top: (run.y + (edit?.dy ?? 0)) * scale,
               width: Math.max(2, end - start) * scale,
               height: run.height * scale,
               zIndex: 15,
@@ -432,7 +426,116 @@ export default function PageView({
   );
 }
 
-function RunEditor({ run, value, scale, actions }: { run: TextRun; value: string; scale: number; actions: PageActions }) {
+function RunHitbox({
+  run,
+  offset,
+  scale,
+  bounds,
+  imageUrl,
+  selected,
+  interactive,
+  actions,
+}: {
+  run: TextRun;
+  offset: Point;
+  scale: number;
+  bounds: { width: number; height: number };
+  imageUrl?: string;
+  selected: boolean;
+  interactive: boolean;
+  actions: PageActions;
+}) {
+  const [drag, setDrag] = useState<Point | null>(null);
+  // Pixels of the run cropped from the page image, shown until a re-rendered page arrives
+  const [ghost, setGhost] = useState<{ img: string; from: Point } | null>(null);
+  const at = drag ?? offset;
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0 || !interactive) return;
+    e.stopPropagation();
+    e.preventDefault();
+    actions.select({ type: "run", id: run.id });
+    const ox = e.clientX;
+    const oy = e.clientY;
+    const base = offset;
+    const gesture = `move-run-${run.id}-${e.timeStamp}`;
+    let last: Point | null = null;
+    const move = (ev: PointerEvent) => {
+      let mx = ev.clientX - ox;
+      let my = ev.clientY - oy;
+      if (!last && Math.hypot(mx, my) < 3) return;
+      if (!last && imageUrl) setGhost({ img: imageUrl, from: base });
+      if (ev.shiftKey) {
+        if (Math.abs(mx) > Math.abs(my)) my = 0;
+        else mx = 0;
+      }
+      last = {
+        x: clamp(run.x + base.x + mx / scale, 0, Math.max(0, bounds.width - run.width)) - run.x,
+        y: clamp(run.y + base.y + my / scale, 0, Math.max(0, bounds.height - run.height)) - run.y,
+      };
+      setDrag(last);
+    };
+    const end = (commit: boolean) => () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      setDrag(null);
+      if (commit && last) actions.moveRun(run, last.x, last.y, gesture);
+    };
+    const onUp = end(true);
+    const onCancel = end(false);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+  };
+
+  const box = { width: run.width * scale, height: run.height * scale };
+  const showGhost = ghost && ghost.img === imageUrl && (ghost.from.x !== at.x || ghost.from.y !== at.y);
+  return (
+    <>
+      {drag && (
+        <div
+          className="pointer-events-none absolute rounded-[2px] outline-dashed outline-1 outline-blue-400"
+          style={{ left: (run.x + offset.x) * scale, top: (run.y + offset.y) * scale, ...box, zIndex: 10 }}
+        />
+      )}
+      {showGhost && (
+        <div
+          className="pointer-events-none absolute"
+          style={{
+            left: (run.x + at.x) * scale,
+            top: (run.y + at.y) * scale,
+            ...box,
+            backgroundImage: `url(${ghost.img})`,
+            backgroundSize: `${bounds.width * scale}px ${bounds.height * scale}px`,
+            backgroundPosition: `${-(run.x + ghost.from.x) * scale}px ${-(run.y + ghost.from.y) * scale}px`,
+            zIndex: 11,
+          }}
+        />
+      )}
+      <div
+        className={`absolute touch-none rounded-[2px] ${interactive ? (selected ? "cursor-move" : "cursor-text") : "pointer-events-none"} ${
+          selected
+            ? "bg-blue-500/10 outline outline-2 outline-blue-500"
+            : interactive
+              ? "hover:bg-blue-500/5 hover:outline hover:outline-1 hover:outline-blue-300"
+              : ""
+        }`}
+        style={{ left: (run.x + at.x) * scale, top: (run.y + at.y) * scale, ...box, zIndex: 12 }}
+        title="Drag to move · double-click to edit"
+        onPointerDown={onPointerDown}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          actions.select({ type: "run", id: run.id });
+          actions.setEditing(run.id);
+        }}
+      />
+    </>
+  );
+}
+
+function RunEditor({ run, offset, value, scale, actions }: { run: TextRun; offset: Point; value: string; scale: number; actions: PageActions }) {
   const [text, setText] = useState(value);
   const done = useRef(false);
   const finish = (commit: boolean) => {
@@ -456,8 +559,8 @@ function RunEditor({ run, value, scale, actions }: { run: TextRun; value: string
       onClick={(e) => e.stopPropagation()}
       className="absolute rounded-[2px] bg-white px-0.5 text-black outline outline-2 outline-blue-500"
       style={{
-        left: run.x * scale - 2,
-        top: run.y * scale,
+        left: (run.x + offset.x) * scale - 2,
+        top: (run.y + offset.y) * scale,
         minWidth: Math.max(run.width * scale + 8, 60),
         width: `${Math.max(text.length, 4) + 2}ch`,
         height: run.height * scale,

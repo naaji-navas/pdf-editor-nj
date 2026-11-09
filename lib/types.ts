@@ -31,6 +31,9 @@ export interface TextEdit {
   text: string;
   /** Only the properties the user explicitly changed. */
   style?: Partial<TextStyle>;
+  /** Offset from the original position, in points (y down). */
+  dx?: number;
+  dy?: number;
 }
 
 export interface ExistingLink {

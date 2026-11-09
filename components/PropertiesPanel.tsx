@@ -21,6 +21,7 @@ export interface PanelActions {
   setDefaults: (fn: (d: ToolDefaults) => ToolDefaults) => void;
   runText: (run: TextRun, text: string, gesture?: string) => void;
   runStyle: (run: TextRun, patch: Partial<TextStyle>, gesture?: string) => void;
+  moveRun: (run: TextRun, dx: number, dy: number, gesture?: string) => void;
   revertRun: (run: TextRun) => void;
   updateObject: (id: string, patch: object, gesture?: string) => void;
   replaceImage: (id: string) => void;
@@ -457,6 +458,8 @@ export default function PropertiesPanel({ selection, tool, doc, run, link, pageC
   if (selection?.type === "run" && run) {
     const edit = doc.textEdits[run.id];
     const style = edit?.style ?? {};
+    const dx = edit?.dx ?? 0;
+    const dy = edit?.dy ?? 0;
     const redraws = style.fontFamily !== undefined || style.bold !== undefined || style.italic !== undefined;
     body = (
       <Section title="PDF text">
@@ -479,6 +482,24 @@ export default function PropertiesPanel({ selection, tool, doc, run, link, pageC
             ? "Font, bold or italic changes redraw this text with the chosen font."
             : "Text, size and color are changed inside the PDF itself, keeping the original font."}
         </p>
+        <div className="flex items-end gap-2">
+          <Field label="X (pt)">
+            <NumberField value={run.x + dx} min={0} max={10000} onChange={(v) => actions.moveRun(run, v - run.x, dy, `panel-${run.id}-x`)} />
+          </Field>
+          <Field label="Y (pt)">
+            <NumberField value={run.y + dy} min={0} max={10000} onChange={(v) => actions.moveRun(run, dx, v - run.y, `panel-${run.id}-y`)} />
+          </Field>
+          {(dx !== 0 || dy !== 0) && (
+            <button
+              onClick={() => actions.moveRun(run, 0, 0)}
+              title="Move back to the original position"
+              className="h-8 shrink-0 rounded-md border border-gray-300 px-2 text-xs text-gray-600 hover:bg-gray-50"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-gray-500">Drag the text on the page or use the arrow keys to move it.</p>
         <div className="flex gap-2">
           <Button onClick={() => actions.revertRun(run)}>
             <Icon name="revert" /> Revert

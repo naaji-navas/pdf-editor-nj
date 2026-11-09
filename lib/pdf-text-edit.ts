@@ -23,6 +23,9 @@ export interface InPlaceEdit {
   color?: [number, number, number];
   /** Remove the original glyphs and let the caller redraw (e.g. a different font was chosen). */
   forceFallback?: boolean;
+  /** Move the text by this offset in PDF user space. */
+  dx?: number;
+  dy?: number;
 }
 
 /** The original glyphs were removed, but the page font can't draw the new text, so the caller must. */
@@ -403,6 +406,8 @@ interface Atom {
   ex: number;
   ey: number;
   kern: number;
+  /** Text matrix at the glyph start */
+  tm: Matrix;
 }
 
 interface ShowOp {
@@ -415,6 +420,10 @@ interface ShowOp {
   fillOps: string;
   charSpacing: number;
   wordSpacing: number;
+  hScale: number;
+  rise: number;
+  renderMode: number;
+  ctm: Matrix;
   invisible: boolean;
   /** Effective rendered size and angle in user space */
   size: number;
@@ -480,6 +489,10 @@ function interpretPage(
       fillOps: gs.fillOps,
       charSpacing: gs.charSpacing,
       wordSpacing: gs.wordSpacing,
+      hScale: gs.hScale,
+      rise: gs.rise,
+      renderMode: gs.renderMode,
+      ctm: gs.ctm,
       invisible: gs.renderMode === 3 || gs.renderMode === 7,
       size: Math.abs(gs.fontSize) * Math.hypot(m[2], m[3]),
       rotation: (Math.atan2(m[1], m[0]) * 180) / Math.PI,
@@ -489,12 +502,13 @@ function interpretPage(
     for (const part of parts) {
       if (part.t === "num") {
         const adv = (-part.v / 1000) * gs.fontSize;
-        run.atoms.push({ kind: "kern", code: 0, unicode: "", adv, x: 0, y: 0, ex: 0, ey: 0, kern: part.v });
+        run.atoms.push({ kind: "kern", code: 0, unicode: "", adv, x: 0, y: 0, ex: 0, ey: 0, kern: part.v, tm });
         tm = mul([1, 0, 0, 1, adv * gs.hScale, 0], tm);
       } else if (part.t === "str") {
         const b = part.bytes;
         for (let k = 0; k + font.bytesPerCode <= b.length; k += font.bytesPerCode) {
           const code = font.bytesPerCode === 2 ? (b[k] << 8) | b[k + 1] : b[k];
+          const startTm = tm;
           const origin = apply(mul(tm, gs.ctm), 0, gs.rise);
           const adv =
             font.width(code) * gs.fontSize +
@@ -505,7 +519,7 @@ function interpretPage(
           const end = apply(mul(tm, gs.ctm), 0, gs.rise);
           run.atoms.push({
             kind: "glyph", code, unicode: font.toUnicode.get(code) ?? "", adv,
-            x: origin.x, y: origin.y, ex: end.x, ey: end.y, kern: 0,
+            x: origin.x, y: origin.y, ex: end.x, ey: end.y, kern: 0, tm: startTm,
           });
         }
       }
@@ -583,18 +597,23 @@ interface Mod {
 }
 
 const fmt = (v: number) => String(Math.round(v * 1000) / 1000);
+const fmtMatrix = (m: Matrix) => m.map((v) => String(Math.round(v * 1e6) / 1e6)).join(" ");
+
+const hexCodes = (font: FontInfo, codes: number[]) =>
+  "<" + codes.map((c) => c.toString(16).padStart(font.bytesPerCode * 2, "0")).join("") + ">";
+
+function advanceOf(show: ShowOp, codes: number[], size: number) {
+  return codes.reduce(
+    (sum, c) =>
+      sum + show.font.width(c) * size + show.charSpacing +
+      (show.font.bytesPerCode === 1 && c === 32 ? show.wordSpacing : 0),
+    0
+  );
+}
 
 function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
   const { font, fontSize, atoms } = show;
-  const hex = (codes: number[]) =>
-    "<" + codes.map((c) => c.toString(16).padStart(font.bytesPerCode * 2, "0")).join("") + ">";
-  const advanceOf = (codes: number[], size: number) =>
-    codes.reduce(
-      (sum, c) =>
-        sum + font.width(c) * size + show.charSpacing +
-        (font.bytesPerCode === 1 && c === 32 ? show.wordSpacing : 0),
-      0
-    );
+  const hex = (codes: number[]) => hexCodes(font, codes);
 
   // Restyled runs need their own TJ wrapped in Tf / color operators, so the op is
   // emitted as consecutive TJ segments (equivalent, since each continues where the last ended)
@@ -619,7 +638,7 @@ function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
       const size = mod.restyle?.fontSize ?? fontSize;
       // Pads before (right-aligned) or after the new text so the run keeps its original
       // extent and anything drawn after it stays where it was
-      const kern = size ? ((advanceOf(mod.insert, size) - removed) * 1000) / size : 0;
+      const kern = size ? ((advanceOf(show, mod.insert, size) - removed) * 1000) / size : 0;
       const pad = Math.abs(kern) > 0.01;
       if (mod.restyle) endSegment();
       if (mod.alignRight && pad) {
@@ -684,6 +703,7 @@ export function editPageText(
 ): { handled: Set<string>; fallbacks: FallbackDraw[] } {
   const handled = new Set<string>();
   const fallbacks: FallbackDraw[] = [];
+  const moves: string[] = [];
 
   const refs = contentRefs(doc, page);
   const streams: string[] = [];
@@ -775,6 +795,10 @@ export function editPageText(
           }
         : undefined;
 
+    const dx = edit.dx ?? 0;
+    const dy = edit.dy ?? 0;
+    const moved = Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01;
+
     for (let k = best.start; k <= best.end; k++) used[k] = true;
     let k = best.start;
     while (k <= best.end) {
@@ -785,9 +809,9 @@ export function editPageText(
       addMod(show, {
         from: first ? glyphs[k].atom : 0,
         to: glyphs[last].atom,
-        insert: first && encodable ? codes : [],
+        insert: first && encodable && !moved ? codes : [],
         alignRight,
-        restyle: first ? restyle : undefined,
+        restyle: first && !moved ? restyle : undefined,
       });
       k = last + 1;
     }
@@ -797,14 +821,39 @@ export function editPageText(
       fallbacks.push({
         id: edit.id,
         text: edit.newText,
-        x: startAtom.x,
-        y: startAtom.y,
+        x: startAtom.x + dx,
+        y: startAtom.y + dy,
         size: startShow.size,
         rotation: startShow.rotation,
         color: startShow.color,
         baseFont: font.baseFont,
-        rightEdge: alignRight ? { x: endAtom.ex, y: endAtom.ey } : undefined,
+        rightEdge: alignRight ? { x: endAtom.ex + dx, y: endAtom.ey + dy } : undefined,
       });
+    } else if (moved && codes.length) {
+      // Re-emit the text at its new position with the page's own font and text state
+      const size = restyle?.fontSize ?? startShow.fontSize;
+      let tm = startAtom.tm;
+      if (alignRight) {
+        let removed = 0;
+        for (let a = glyphs[best.start].atom; a <= glyphs[best.end].atom; a++) removed += startShow.atoms[a].adv;
+        tm = mul([1, 0, 0, 1, (removed - advanceOf(startShow, codes, size)) * startShow.hScale, 0], tm);
+      }
+      const fill = restyle?.color ? `${restyle.color.map(fmt).join(" ")} rg` : startShow.fillOps || "0 g";
+      moves.push(
+        [
+          "q",
+          `1 0 0 1 ${fmt(dx)} ${fmt(dy)} cm`,
+          `${fmtMatrix(startShow.ctm)} cm`,
+          "BT",
+          `/${startShow.fontName} ${fmt(size)} Tf`,
+          fill,
+          `${fmt(startShow.charSpacing)} Tc ${fmt(startShow.wordSpacing)} Tw ${fmt(startShow.hScale * 100)} Tz ${fmt(startShow.rise)} Ts ${startShow.renderMode} Tr`,
+          `${fmtMatrix(tm)} Tm`,
+          `${hexCodes(font, codes)} Tj`,
+          "ET",
+          "Q",
+        ].join("\n")
+      );
     }
   }
 
@@ -829,6 +878,14 @@ export function editPageText(
     }
     doc.context.assign(refs[i], next);
   });
+
+  if (moves.length) {
+    // Balance the original content so the appended text starts from the default graphics state
+    page.node.normalize();
+    page.node.wrapContentStreams(doc.context.getPushGraphicsStateContentStream(), doc.context.getPopGraphicsStateContentStream());
+    const bytes = Uint8Array.from(moves.join("\n"), (c) => c.charCodeAt(0));
+    page.node.addContentStream(doc.context.register(doc.context.flateStream(bytes)));
+  }
 
   return { handled, fallbacks };
 }

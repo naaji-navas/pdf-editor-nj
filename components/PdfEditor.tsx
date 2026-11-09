@@ -13,6 +13,7 @@ import {
   type Rect,
   type SearchHit,
   type Selection,
+  type TextEdit,
   type TextObject,
   type TextRun,
   type TextStyle,
@@ -121,17 +122,31 @@ const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.roun
 const desiredKey = (pageIndex: number, preview: Preview | null, zoom: number) =>
   `${preview?.pages.has(pageIndex) ? preview.version : 0}@${zoom}`;
 
-function setRunEdit(d: DocState, run: TextRun, text: string, style: Partial<TextStyle> | undefined): DocState {
-  const hasStyle = !!style && Object.keys(style).length > 0;
+type RunPatch = { text?: string; style?: Partial<TextStyle>; dx?: number; dy?: number };
+
+function setRunEdit(d: DocState, run: TextRun, patch: RunPatch): DocState {
   const existing = d.textEdits[run.id];
+  const text = patch.text ?? existing?.text ?? run.text;
+  const style = "style" in patch ? patch.style : existing?.style;
+  const hasStyle = !!style && Object.keys(style).length > 0;
+  const dx = Math.round((patch.dx ?? existing?.dx ?? 0) * 100) / 100;
+  const dy = Math.round((patch.dy ?? existing?.dy ?? 0) * 100) / 100;
+  const moved = dx !== 0 || dy !== 0;
   const next = { ...d.textEdits };
-  if (text === run.text && !hasStyle) {
+  if (text === run.text && !hasStyle && !moved) {
     if (!existing) return d;
     delete next[run.id];
   } else {
-    const nextStyle = hasStyle ? style : undefined;
-    if (existing && existing.text === text && JSON.stringify(existing.style) === JSON.stringify(nextStyle)) return d;
-    next[run.id] = { run, text, style: nextStyle };
+    const edit: TextEdit = { run, text, style: hasStyle ? style : undefined, ...(moved ? { dx, dy } : {}) };
+    if (
+      existing &&
+      existing.text === edit.text &&
+      (existing.dx ?? 0) === dx &&
+      (existing.dy ?? 0) === dy &&
+      JSON.stringify(existing.style) === JSON.stringify(edit.style)
+    )
+      return d;
+    next[run.id] = edit;
   }
   return { ...d, textEdits: next };
 }
@@ -526,7 +541,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   };
 
   const runText = (run: TextRun, text: string, gesture?: string) =>
-    update((d) => setRunEdit(d, run, text, d.textEdits[run.id]?.style), gesture);
+    update((d) => setRunEdit(d, run, { text }), gesture);
 
   const runStyle = (run: TextRun, patch: Partial<TextStyle>, gesture?: string) =>
     update((d) => {
@@ -537,8 +552,23 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         else style[k] = v;
       }
       if (style.fontSize === run.fontSize) delete style.fontSize;
-      return setRunEdit(d, run, edit?.text ?? run.text, style as Partial<TextStyle>);
+      return setRunEdit(d, run, { style: style as Partial<TextStyle> });
     }, gesture);
+
+  const moveRun = (run: TextRun, dx: number, dy: number, gesture?: string) => {
+    const page = infos[run.pageIndex];
+    if (!page) return;
+    const width = Math.min(run.width, page.width);
+    const height = Math.min(run.height, page.height);
+    const x = Math.min(Math.max(run.x + dx, 0), page.width - width);
+    const y = Math.min(Math.max(run.y + dy, 0), page.height - height);
+    update((d) => setRunEdit(d, run, { dx: x - run.x, dy: y - run.y }), gesture);
+  };
+
+  const nudgeRun = (run: TextRun, dx: number, dy: number) => {
+    const edit = doc.textEdits[run.id];
+    moveRun(run, (edit?.dx ?? 0) + dx, (edit?.dy ?? 0) + dy, `nudge-run-${run.id}`);
+  };
 
   const revertRun = (run: TextRun) =>
     update((d) => {
@@ -605,6 +635,9 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     if (selection?.type === "object" && selectedObject) {
       const page = infos[selectedObject.pageIndex];
       if (page) update((d) => ({ ...d, objects: d.objects.map((o) => (o.id === selectedObject.id ? moveObject(o, dx, dy, page) : o)) }), `nudge-${selectedObject.id}`);
+    } else if (selection?.type === "run") {
+      const run = findRun(selection.id);
+      if (run) nudgeRun(run, dx, dy);
     } else if (selection?.type === "crop") {
       const rect = doc.crops[selection.pageIndex];
       const page = infos[selection.pageIndex];
@@ -715,7 +748,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         for (const h of [...runHits].sort((a, b) => b.start - a.start)) {
           text = text.slice(0, h.start) + replacement + text.slice(h.end);
         }
-        next = setRunEdit(next, run, text, next.textEdits[runId]?.style);
+        next = setRunEdit(next, run, { text });
       }
       return next;
     });
@@ -871,6 +904,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     },
     setEditing: setEditingId,
     commitRunText: (run, text) => runText(run, text),
+    moveRun,
     commitObjectText,
     updateObject,
     addObject,
@@ -881,6 +915,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     setDefaults,
     runText,
     runStyle,
+    moveRun,
     revertRun,
     updateObject,
     replaceImage: (id) => {
