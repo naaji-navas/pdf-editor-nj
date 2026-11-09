@@ -21,8 +21,16 @@ interface TopBarProps {
   onShortcuts: () => void;
   onDownload: () => void;
   downloading: boolean;
-  hasEdits: boolean;
+  saveStatus: SaveStatus;
 }
+
+export type SaveStatus = "idle" | "saving" | "saved" | "unsaved";
+
+const SAVE_BADGES: Record<Exclude<SaveStatus, "idle">, { label: string; title: string; className: string }> = {
+  saving: { label: "Saving…", title: "Saving your edits in this browser", className: "text-gray-500" },
+  saved: { label: "Saved", title: "Edits are saved in this browser. Reopen this PDF to continue where you left off.", className: "text-emerald-600" },
+  unsaved: { label: "Not saved", title: "This browser can't store your edits. Download to keep them.", className: "bg-amber-50 text-amber-700" },
+};
 
 export const ZOOM_MIN = 0.25;
 export const ZOOM_MAX = 4;
@@ -59,7 +67,15 @@ export default function TopBar(props: TopBarProps) {
       <div className="min-w-0 max-w-64 truncate text-sm font-medium text-gray-800" title={props.fileName}>
         {props.fileName}
       </div>
-      {props.hasEdits && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">Unsaved</span>}
+      {props.saveStatus !== "idle" && (
+        <span
+          title={SAVE_BADGES[props.saveStatus].title}
+          className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${SAVE_BADGES[props.saveStatus].className}`}
+        >
+          {props.saveStatus === "saved" && <Icon name="check" className="h-3 w-3" />}
+          {SAVE_BADGES[props.saveStatus].label}
+        </span>
+      )}
 
       <div className="flex flex-1 items-center justify-center">
         <Group>

@@ -23,11 +23,12 @@ import { extractPage, getPageInfos, loadPdf, renderPageImage, type PdfDoc } from
 import { applyEdits } from "@/lib/pdf-modifier";
 import { useHistory } from "@/lib/use-history";
 import { createRenderQueue } from "@/lib/render-queue";
-import { loadCustomFont } from "@/lib/fonts";
+import { loadCustomFont, registerFont } from "@/lib/fonts";
+import { countEdits, deleteSession, fingerprint, loadSession, saveSession } from "@/lib/autosave";
 import { loadImageFile } from "@/lib/images";
 import { newId } from "@/lib/ids";
 import PageView, { type PageActions } from "./PageView";
-import TopBar, { ZOOM_MAX, ZOOM_MIN, zoomStep } from "./TopBar";
+import TopBar, { ZOOM_MAX, ZOOM_MIN, zoomStep, type SaveStatus } from "./TopBar";
 import ToolRail, { TOOL_KEYS } from "./ToolRail";
 import ThumbnailSidebar from "./ThumbnailSidebar";
 import PropertiesPanel, { type PanelActions } from "./PropertiesPanel";
@@ -114,6 +115,8 @@ const isTypingTarget = (el: EventTarget | null) =>
   (el instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(el.type)) ||
   (el instanceof HTMLElement && el.isContentEditable);
 
+const NO_FONTS: CustomFont[] = [];
+
 const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
 const desiredKey = (pageIndex: number, preview: Preview | null, zoom: number) =>
   `${preview?.pages.has(pageIndex) ? preview.version : 0}@${zoom}`;
@@ -151,14 +154,14 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   const [infos, setInfos] = useState<PageInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const history = useHistory<DocState>(EMPTY_DOC);
-  const { present: doc, update, undo, redo } = history;
+  const { present: doc, update, undo, redo, reset } = history;
 
   const [tool, setTool] = useState<Tool>("select");
   const [selection, setSelection] = useState<Selection>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState<TextObject | null>(null);
   const [defaults, setDefaults] = useState(DEFAULTS);
-  const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  const [customFonts, setCustomFonts] = useState<CustomFont[]>(NO_FONTS);
 
   const [zoom, setZoom] = useState(1);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -175,6 +178,9 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   const [downloading, setDownloading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [saved, setSaved] = useState<{ doc: DocState; fonts: CustomFont[] } | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
 
   const [pageQueue] = useState(() => createRenderQueue(2));
   const [dataQueue] = useState(() => createRenderQueue(2));
@@ -337,18 +343,67 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     return () => clearTimeout(timer);
   }, [notice]);
 
-  const hasEdits =
-    Object.keys(doc.textEdits).length > 0 ||
-    Object.keys(doc.linkEdits).length > 0 ||
-    doc.objects.length > 0 ||
-    Object.keys(doc.crops).length > 0;
+  const hasEdits = countEdits(doc) > 0;
+
+  // ---- Autosave (IndexedDB, keyed by the PDF's hash) ----
 
   useEffect(() => {
-    if (!hasEdits) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await fingerprint(pdfData);
+        const session = await loadSession(id);
+        if (cancelled) return;
+        if (session) {
+          const fonts = await Promise.all(session.fonts.map((f) => registerFont(f).catch(() => f)));
+          if (cancelled) return;
+          reset(session.doc);
+          setCustomFonts(fonts);
+          setSaved({ doc: session.doc, fonts });
+          setNotice(`Restored your edits from ${new Date(session.updatedAt).toLocaleString()}`);
+        } else {
+          setSaved({ doc: EMPTY_DOC, fonts: NO_FONTS });
+        }
+        setSessionId(id);
+      } catch (err) {
+        console.warn("Autosave unavailable:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfData, reset]);
+
+  const pendingSave = !!sessionId && (saved?.doc !== doc || saved?.fonts !== customFonts);
+
+  useEffect(() => {
+    if (!sessionId || !pendingSave) return;
+    const timer = setTimeout(async () => {
+      try {
+        if (countEdits(doc) > 0 || customFonts.length > 0) {
+          await saveSession({ id: sessionId, fileName, pdf: pdfData, doc, fonts: customFonts, updatedAt: Date.now() });
+        } else {
+          await deleteSession(sessionId);
+        }
+        setSaved({ doc, fonts: customFonts });
+        setSaveFailed(false);
+      } catch (err) {
+        console.warn("Autosave failed:", err);
+        setSaveFailed(true);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [sessionId, pendingSave, doc, customFonts, fileName, pdfData]);
+
+  const saveStatus: SaveStatus = !sessionId || saveFailed ? (hasEdits ? "unsaved" : "idle") : pendingSave ? "saving" : hasEdits ? "saved" : "idle";
+  const atRisk = saveStatus === "unsaved" || saveStatus === "saving";
+
+  useEffect(() => {
+    if (!atRisk) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [hasEdits]);
+  }, [atRisk]);
 
   // ---- Viewport ----
 
@@ -707,7 +762,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
   };
 
   const handleBack = () => {
-    if (hasEdits && !confirm("Leave the editor? Your changes haven't been downloaded.")) return;
+    if (atRisk && !confirm("Your latest changes haven't been saved yet. Leave anyway?")) return;
     onBack();
   };
 
@@ -869,7 +924,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
         onShortcuts={() => setShowShortcuts(true)}
         onDownload={handleDownload}
         downloading={downloading}
-        hasEdits={hasEdits}
+        saveStatus={saveStatus}
       />
 
       <div className="flex min-h-0 flex-1">

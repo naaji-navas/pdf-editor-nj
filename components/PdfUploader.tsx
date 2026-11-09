@@ -1,6 +1,16 @@
 "use client";
 
-import { useCallback, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
+import { deleteSession, listSessions, loadSession, type SessionSummary } from "@/lib/autosave";
+
+function timeAgo(ms: number) {
+  const minutes = Math.round((Date.now() - ms) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return new Date(ms).toLocaleDateString();
+}
 
 interface PdfUploaderProps {
   onFileLoaded: (data: ArrayBuffer, fileName: string) => void;
@@ -9,6 +19,21 @@ interface PdfUploaderProps {
 export default function PdfUploader({ onFileLoaded }: PdfUploaderProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+
+  useEffect(() => {
+    listSessions().then(setSessions, () => setSessions([]));
+  }, []);
+
+  const resume = async (id: string) => {
+    const session = await loadSession(id).catch(() => undefined);
+    if (session) onFileLoaded(session.pdf, session.fileName);
+  };
+
+  const discard = async (id: string) => {
+    await deleteSession(id).catch(() => {});
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+  };
 
   const handleFile = useCallback(
     (file: File) => {
@@ -97,9 +122,39 @@ export default function PdfUploader({ onFileLoaded }: PdfUploaderProps) {
         />
       </div>
 
+      {sessions.length > 0 && (
+        <div className="mt-6 w-full max-w-lg">
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Continue editing</h2>
+          <ul className="divide-y divide-gray-100 overflow-hidden rounded-xl border border-gray-200 bg-white">
+            {sessions.map((s) => (
+              <li key={s.id} className="flex items-center gap-3 px-4 py-2.5">
+                <button onClick={() => resume(s.id)} className="min-w-0 flex-1 text-left">
+                  <p className="truncate text-sm font-medium text-gray-800 hover:text-blue-600">{s.fileName}</p>
+                  <p className="text-xs text-gray-400">
+                    {s.editCount} {s.editCount === 1 ? "edit" : "edits"} · saved {timeAgo(s.updatedAt)}
+                  </p>
+                </button>
+                <button
+                  onClick={() => resume(s.id)}
+                  className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                >
+                  Resume
+                </button>
+                <button
+                  onClick={() => discard(s.id)}
+                  className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-red-600"
+                >
+                  Discard
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <p className="mt-6 text-xs text-gray-400">
         Files are processed entirely in your browser. Nothing is uploaded to any
-        server.
+        server. Your edits are saved automatically on this device.
       </p>
 
       <div className="mt-8 flex flex-col items-center gap-3">

@@ -25,6 +25,7 @@ const PATHS = {
   close: "M18 6 6 18M6 6l12 12",
   up: "m18 15-6-6-6 6",
   down: "m6 9 6 6 6-6",
+  check: "M20 6 9 17l-5-5",
   revert: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5",
 } as const;
 

@@ -45,8 +45,13 @@ export async function loadCustomFont(file: File): Promise<CustomFont> {
     throw new Error("Only TrueType (.ttf) and OpenType (.otf) fonts are supported.");
   }
   const name = file.name.replace(/\.(ttf|otf)$/i, "").replace(/[^\w -]/g, "").slice(0, 60) || "Custom font";
-  const face = new FontFace(name, bytes.slice(0));
+  return registerFont({ name, bytes });
+}
+
+/** Makes a font available to the on-screen preview. */
+export async function registerFont(font: CustomFont) {
+  const face = new FontFace(font.name, font.bytes.slice(0));
   await face.load();
   document.fonts.add(face);
-  return { name, bytes };
+  return font;
 }
