@@ -29,7 +29,6 @@ export default function EditableText({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const isNewItem = !!item.isNew;
-  const hasBeenEdited = !!item.originalText;
 
   useEffect(() => {
     startTransition(() => setEditText(item.text));
@@ -135,7 +134,8 @@ export default function EditableText({
     );
   }
 
-  if (isNewItem || hasBeenEdited) {
+  // Edits to existing text are shown by the re-rendered page image itself
+  if (isNewItem) {
     return (
       <div
         className={`absolute cursor-pointer select-none whitespace-pre ${

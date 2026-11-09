@@ -1,5 +1,6 @@
-import { PDFDocument, StandardFonts, rgb } from "@cantoo/pdf-lib";
+import { PDFDocument, StandardFonts, degrees, rgb } from "@cantoo/pdf-lib";
 import type { TextItem, PageData, Rect, ColoroutBox } from "./types";
+import { editPageText, type FallbackDraw, type InPlaceEdit } from "./pdf-text-edit";
 
 function hexToRgb(hex: string) {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
@@ -23,10 +24,12 @@ function mapFontFamily(
   isBold?: boolean,
   isItalic?: boolean
 ): keyof typeof StandardFonts {
-  const lower = fontFamily.toLowerCase();
+  // PDF base font names drop spaces ("LiberationSerif"), so compare without them
+  const compact = (s: string) => s.toLowerCase().replace(/[\s_-]/g, "");
+  const lower = compact(fontFamily);
 
-  const isMono = MONO_KEYWORDS.some((k) => lower.includes(k));
-  const isSerif = SERIF_KEYWORDS.some((k) => lower.includes(k));
+  const isMono = MONO_KEYWORDS.some((k) => lower.includes(compact(k)));
+  const isSerif = SERIF_KEYWORDS.some((k) => lower.includes(compact(k)));
 
   if (isMono) {
     if (isBold && isItalic) return "CourierBoldOblique";
@@ -80,6 +83,26 @@ export async function applyEdits(
     return { x: box.x + r.x, y: box.y + box.height - r.y - r.height, width: r.width, height: r.height };
   };
 
+  // Must run before anything is drawn: drawing wraps the original content streams
+  const inPlace = new Set<string>();
+  const fallbacks: (FallbackDraw & { pageIndex: number })[] = [];
+  const editsByPage = new Map<number, InPlaceEdit[]>();
+  for (const [id, item] of editedItems) {
+    if (item.pageIndex >= pdfPages.length || item.pdfX === undefined || item.pdfY === undefined) continue;
+    const list = editsByPage.get(item.pageIndex) ?? [];
+    list.push({ id, pdfX: item.pdfX, pdfY: item.pdfY, originalText: item.originalText ?? "", newText: item.text });
+    editsByPage.set(item.pageIndex, list);
+  }
+  for (const [pageIndex, edits] of editsByPage) {
+    try {
+      const { handled, fallbacks: pageFallbacks } = editPageText(pdfDoc, pdfPages[pageIndex], edits);
+      handled.forEach((id) => inPlace.add(id));
+      fallbacks.push(...pageFallbacks.map((f) => ({ ...f, pageIndex })));
+    } catch (err) {
+      console.warn("In-place text edit failed; using overlay instead", err);
+    }
+  }
+
   for (const box of colorouts) {
     if (box.pageIndex >= pdfPages.length) continue;
     pdfPages[box.pageIndex].drawRectangle({
@@ -115,8 +138,29 @@ export async function applyEdits(
     return out;
   }
 
-  for (const [, item] of editedItems) {
-    if (item.pageIndex >= pdfPages.length) continue;
+  for (const f of fallbacks) {
+    const font = await getFont(f.baseFont, /bold|black|heavy|semibold/i.test(f.baseFont), /italic|oblique/i.test(f.baseFont));
+    const text = toEncodable(f.text, font);
+    let { x, y } = f;
+    if (f.rightEdge) {
+      const width = font.widthOfTextAtSize(text, f.size);
+      const angle = (f.rotation * Math.PI) / 180;
+      x = f.rightEdge.x - width * Math.cos(angle);
+      y = f.rightEdge.y - width * Math.sin(angle);
+    }
+    pdfPages[f.pageIndex].drawText(text, {
+      x,
+      y,
+      size: f.size,
+      font,
+      color: rgb(...f.color),
+      rotate: degrees(f.rotation),
+    });
+  }
+
+  // Text not found in the content stream (e.g. invisible OCR text over a scan) can only be covered
+  for (const [id, item] of editedItems) {
+    if (item.pageIndex >= pdfPages.length || inPlace.has(id)) continue;
     const page = pdfPages[item.pageIndex];
     const { height: pageHeight } = page.getSize();
 

@@ -18,22 +18,33 @@ export async function loadPdf(data: ArrayBuffer) {
   return loadingTask.promise;
 }
 
+type PdfDoc = Awaited<ReturnType<typeof loadPdf>>;
+type PdfPageProxy = Awaited<ReturnType<PdfDoc["getPage"]>>;
+
+async function drawToCanvas(page: PdfPageProxy, scale: number) {
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const viewport = page.getViewport({ scale: scale * dpr });
+  const canvas = document.createElement("canvas");
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext("2d")!;
+  await page.render({ canvas: null, canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+
+export async function renderPageImage(pdf: PdfDoc, pageIndex: number, scale: number) {
+  const canvas = await drawToCanvas(await pdf.getPage(pageIndex + 1), scale);
+  return canvas.toDataURL();
+}
+
 export async function renderPage(
-  pdf: Awaited<ReturnType<typeof loadPdf>>,
+  pdf: PdfDoc,
   pageIndex: number,
   scale: number
 ): Promise<{ canvas: HTMLCanvasElement; pageData: PageData }> {
   const page = await pdf.getPage(pageIndex + 1);
-  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-  const viewport = page.getViewport({ scale: scale * dpr });
   const cssViewport = page.getViewport({ scale });
-
-  const canvas = document.createElement("canvas");
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-
-  const ctx = canvas.getContext("2d")!;
-  await page.render({ canvas: null, canvasContext: ctx, viewport }).promise;
+  const canvas = await drawToCanvas(page, scale);
 
   const textContent = await page.getTextContent();
   const textItems: TextItem[] = [];
@@ -59,6 +70,8 @@ export async function renderPage(
       fontFamily: item.fontName ?? "Helvetica",
       color: "#000000",
       pageIndex,
+      pdfX: tx[4],
+      pdfY: tx[5],
     });
   }
 

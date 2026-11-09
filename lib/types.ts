@@ -9,6 +9,9 @@ export interface TextItem {
   fontFamily: string;
   color: string;
   pageIndex: number;
+  /** Baseline origin in PDF user space; used to locate the text in the content stream. */
+  pdfX?: number;
+  pdfY?: number;
   originalText?: string;
   isNew?: boolean;
   isBold?: boolean;

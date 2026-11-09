@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { TextItem, PageData, Rect, Tool, ColoroutBox } from "@/lib/types";
-import { loadPdf, renderPage } from "@/lib/pdf-renderer";
+import { loadPdf, renderPage, renderPageImage } from "@/lib/pdf-renderer";
 import { applyEdits } from "@/lib/pdf-modifier";
 import { normalizePdfFontToToolbar, clampToToolbarFont } from "@/lib/font-utils";
 import Toolbar from "./Toolbar";
@@ -120,6 +120,28 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
     init();
     return () => { cancelled = true; };
   }, [pdfData, scale]);
+
+  // Re-render edited pages from the actual output so the preview matches the download
+  const [editPreviews, setEditPreviews] = useState<Map<number, string>>(new Map());
+  useEffect(() => {
+    if (editedItems.size === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const bytes = await applyEdits(pdfDataRef.current, [], editedItems, [], scale);
+        const doc = await loadPdf(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+        const next = new Map<number, string>();
+        for (const pageIndex of new Set([...editedItems.values()].map((item) => item.pageIndex))) {
+          next.set(pageIndex, await renderPageImage(doc, pageIndex, scale));
+        }
+        await doc.destroy();
+        if (!cancelled) setEditPreviews(next);
+      } catch (err) {
+        console.error("Failed to render edit preview:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [editedItems, scale]);
 
   const handleEditItem = useCallback(
     (id: string, newText: string) => {
@@ -414,7 +436,9 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
             <PdfPage
               key={page.pageData.pageIndex}
               pageData={page.pageData}
-              canvasDataUrl={page.canvasDataUrl}
+              canvasDataUrl={
+                (editedItems.size > 0 && editPreviews.get(page.pageData.pageIndex)) || page.canvasDataUrl
+              }
               editedItems={editedItems}
               newItems={newItems}
               colorouts={colorouts.filter((box) => box.pageIndex === page.pageData.pageIndex)}
