@@ -535,6 +535,20 @@ function RunHitbox({
   );
 }
 
+// Editors can unmount without a blur (e.g. selecting something else on pointerdown), so keep what was typed
+function useCommitOnUnmount(done: React.RefObject<boolean>, commit: () => void) {
+  const latest = useRef(commit);
+  useEffect(() => {
+    latest.current = commit;
+  });
+  useEffect(
+    () => () => {
+      if (!done.current) latest.current();
+    },
+    [done]
+  );
+}
+
 function RunEditor({ run, offset, value, scale, actions }: { run: TextRun; offset: Point; value: string; scale: number; actions: PageActions }) {
   const [text, setText] = useState(value);
   const done = useRef(false);
@@ -544,6 +558,7 @@ function RunEditor({ run, offset, value, scale, actions }: { run: TextRun; offse
     if (commit) actions.commitRunText(run, text);
     actions.setEditing(null);
   };
+  useCommitOnUnmount(done, () => text !== value && actions.commitRunText(run, text));
   return (
     <input
       autoFocus
@@ -581,6 +596,7 @@ function TextObjectEditor({ obj, scale, actions }: { obj: TextObject; scale: num
     actions.commitObjectText(obj.id, commit ? text : obj.text);
     actions.setEditing(null);
   };
+  useCommitOnUnmount(done, () => text !== obj.text && actions.commitObjectText(obj.id, text));
   const size = measureText(text || "Type here", obj.style);
   return (
     <textarea

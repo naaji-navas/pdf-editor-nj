@@ -758,7 +758,7 @@ export default function PdfEditor({ pdfData, fileName, onBack }: PdfEditorProps)
 
   const handleDownload = async () => {
     if (!pdf || downloading) return;
-    const downloadName = `${fileName.replace(/\.pdf$/i, "")}-edited.pdf`;
+    const downloadName = /\.pdf$/i.test(fileName) ? fileName : `${fileName}.pdf`;
 
     // Must be opened before any await so it still counts as part of the click
     let fileHandle: FileSystemFileHandle | null = null;

@@ -1,10 +1,15 @@
 import {
   LineCapStyle,
   PDFArray,
+  PDFContext,
   PDFDict,
   PDFDocument,
+  PDFHexString,
   PDFName,
   PDFNumber,
+  PDFObject,
+  PDFRef,
+  PDFStream,
   PDFString,
   StandardFonts,
   degrees,
@@ -100,7 +105,7 @@ export async function applyEdits(
   let pdfDoc: PDFDocument;
   try {
     // Empty password decrypts owner-password-only PDFs (open without a password but block editing)
-    pdfDoc = await PDFDocument.load(originalPdfBytes, { password: "" });
+    pdfDoc = await PDFDocument.load(originalPdfBytes, { password: "", updateMetadata: false });
   } catch (err) {
     if (err instanceof Error && /encrypt|password/i.test(err.message)) {
       throw new Error("This PDF is password-protected, so it can't be modified. Remove the password and try again.");
@@ -255,6 +260,10 @@ export async function applyEdits(
     }
   }
 
+  if (!textOnly) {
+    await pdfDoc.flush();
+    writeAsNewDocument(pdfDoc);
+  }
   return pdfDoc.save();
 
   async function drawObject(page: PDFPage, obj: DocState["objects"][number]) {
@@ -375,6 +384,46 @@ export async function applyEdits(
         Object.entries(action).forEach(([k, v]) => annot.set(PDFName.of(k), v));
       }
     }
+  }
+}
+
+const HISTORY_KEYS = ["Metadata", "PieceInfo", "LastModified"].map((k) => PDFName.of(k));
+
+// Output carries no trace of the source file's metadata or of this editor: fresh Info and file ID, no XMP, no orphans
+function writeAsNewDocument(pdfDoc: PDFDocument) {
+  const { context } = pdfDoc;
+  const now = PDFString.fromDate(new Date());
+  context.trailerInfo.Info = context.register(context.obj({ CreationDate: now, ModDate: now }));
+
+  const id = crypto.getRandomValues(new Uint8Array(16));
+  const hex = PDFHexString.of(Array.from(id, (b) => b.toString(16).padStart(2, "0")).join(""));
+  context.trailerInfo.ID = context.obj([hex, hex]);
+
+  dropUnreachable(context);
+}
+
+function dropUnreachable(context: PDFContext) {
+  const { Root, Info, Encrypt } = context.trailerInfo;
+  const seen = new Set<PDFRef>();
+  const stack: PDFObject[] = [Root, Info, Encrypt].filter((o): o is PDFObject => !!o);
+  while (stack.length) {
+    const obj = stack.pop()!;
+    if (obj instanceof PDFRef) {
+      if (seen.has(obj)) continue;
+      seen.add(obj);
+      const target = context.lookup(obj);
+      if (target) stack.push(target);
+    } else if (obj instanceof PDFDict) {
+      HISTORY_KEYS.forEach((k) => obj.delete(k));
+      for (const [, value] of obj.entries()) stack.push(value);
+    } else if (obj instanceof PDFArray) {
+      stack.push(...obj.asArray());
+    } else if (obj instanceof PDFStream) {
+      stack.push(obj.dict);
+    }
+  }
+  for (const [ref] of context.enumerateIndirectObjects()) {
+    if (!seen.has(ref)) context.delete(ref);
   }
 }
 
