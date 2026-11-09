@@ -18,6 +18,11 @@ export interface InPlaceEdit {
   pdfY: number;
   originalText: string;
   newText: string;
+  /** Rendered size in points; applied in place by changing the font size. */
+  size?: number;
+  color?: [number, number, number];
+  /** Remove the original glyphs and let the caller redraw (e.g. a different font was chosen). */
+  forceFallback?: boolean;
 }
 
 /** The original glyphs were removed, but the page font can't draw the new text, so the caller must. */
@@ -404,7 +409,10 @@ interface ShowOp {
   stream: number;
   op: Op;
   font: FontInfo;
+  fontName: string;
   fontSize: number;
+  /** Raw operators that set the current fill color, to restore it after a recolored run */
+  fillOps: string;
   charSpacing: number;
   wordSpacing: number;
   invisible: boolean;
@@ -418,7 +426,10 @@ interface ShowOp {
 interface GState {
   ctm: Matrix;
   color: [number, number, number];
+  fillOps: string;
+  colorSpaceOp: string;
   font: FontInfo | null;
+  fontName: string;
   fontSize: number;
   charSpacing: number;
   wordSpacing: number;
@@ -445,7 +456,7 @@ function interpretPage(
 
   const shows: ShowOp[] = [];
   let gs: GState = {
-    ctm: IDENTITY, color: [0, 0, 0], font: null, fontSize: 0, charSpacing: 0,
+    ctm: IDENTITY, color: [0, 0, 0], fillOps: "", colorSpaceOp: "", font: null, fontName: "", fontSize: 0, charSpacing: 0,
     wordSpacing: 0, hScale: 1, leading: 0, rise: 0, renderMode: 0,
   };
   const stack: GState[] = [];
@@ -464,7 +475,9 @@ function interpretPage(
     const m = mul(tm, gs.ctm);
     const run: ShowOp = {
       stream, op, font,
+      fontName: gs.fontName,
       fontSize: gs.fontSize,
+      fillOps: gs.fillOps,
       charSpacing: gs.charSpacing,
       wordSpacing: gs.wordSpacing,
       invisible: gs.renderMode === 3 || gs.renderMode === 7,
@@ -504,28 +517,32 @@ function interpretPage(
     for (const op of parseContent(content)) {
       const a = op.args;
       const n = nums(a);
+      const raw = () => content.slice(op.start, op.end);
       switch (op.op) {
         case "q": stack.push({ ...gs }); break;
         case "Q": if (stack.length) gs = stack.pop()!; break;
         case "cm": if (n.length === 6) gs.ctm = mul(n as Matrix, gs.ctm); break;
-        case "g": gs.color = [n[0], n[0], n[0]]; break;
-        case "rg": gs.color = [n[0], n[1], n[2]]; break;
+        case "g": gs.color = [n[0], n[0], n[0]]; gs.fillOps = raw(); break;
+        case "rg": gs.color = [n[0], n[1], n[2]]; gs.fillOps = raw(); break;
         case "k": {
           const [c, mg, y, kk] = n;
           gs.color = [(1 - c) * (1 - kk), (1 - mg) * (1 - kk), (1 - y) * (1 - kk)];
+          gs.fillOps = raw();
           break;
         }
-        case "cs": gs.color = [0, 0, 0]; break;
+        case "cs": gs.color = [0, 0, 0]; gs.colorSpaceOp = gs.fillOps = raw(); break;
         case "sc": case "scn": {
           const v = a.filter((x) => x.t === "num").map((x) => (x as { v: number }).v);
           if (v.length === 1) gs.color = [v[0], v[0], v[0]];
           else if (v.length === 3) gs.color = [v[0], v[1], v[2]];
           else if (v.length === 4) gs.color = [(1 - v[0]) * (1 - v[3]), (1 - v[1]) * (1 - v[3]), (1 - v[2]) * (1 - v[3])];
+          gs.fillOps = `${gs.colorSpaceOp} ${raw()}`.trim();
           break;
         }
         case "BT": tm = tlm = IDENTITY; break;
         case "Tf":
           gs.font = a[0]?.t === "name" ? getFont(a[0].v) : null;
+          gs.fontName = a[0]?.t === "name" ? a[0].v : "";
           gs.fontSize = n[1] ?? 0;
           break;
         case "Tc": gs.charSpacing = n[0]; break;
@@ -561,6 +578,8 @@ interface Mod {
   to: number;
   insert: number[];
   alignRight: boolean;
+  /** New font size (Tf operand) and/or fill color for the inserted text */
+  restyle?: { fontSize?: number; color?: [number, number, number] };
 }
 
 const fmt = (v: number) => String(Math.round(v * 1000) / 1000);
@@ -569,19 +588,27 @@ function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
   const { font, fontSize, atoms } = show;
   const hex = (codes: number[]) =>
     "<" + codes.map((c) => c.toString(16).padStart(font.bytesPerCode * 2, "0")).join("") + ">";
-  const advanceOf = (codes: number[]) =>
+  const advanceOf = (codes: number[], size: number) =>
     codes.reduce(
       (sum, c) =>
-        sum + font.width(c) * fontSize + show.charSpacing +
+        sum + font.width(c) * size + show.charSpacing +
         (font.bytesPerCode === 1 && c === 32 ? show.wordSpacing : 0),
       0
     );
 
-  const elems: string[] = [];
+  // Restyled runs need their own TJ wrapped in Tf / color operators, so the op is
+  // emitted as consecutive TJ segments (equivalent, since each continues where the last ended)
+  const segments: string[] = [];
+  let elems: string[] = [];
   let chunk: number[] = [];
   const flush = () => {
     if (chunk.length) elems.push(hex(chunk));
     chunk = [];
+  };
+  const endSegment = (pre = "", post = "") => {
+    flush();
+    if (elems.length) segments.push(`${pre}[${elems.join(" ")}] TJ${post}`);
+    elems = [];
   };
 
   for (let a = 0; a < atoms.length; a++) {
@@ -589,10 +616,12 @@ function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
     if (mod) {
       let removed = 0;
       for (let k = mod.from; k <= mod.to; k++) removed += atoms[k].adv;
+      const size = mod.restyle?.fontSize ?? fontSize;
       // Pads before (right-aligned) or after the new text so the run keeps its original
       // extent and anything drawn after it stays where it was
-      const kern = fontSize ? ((advanceOf(mod.insert) - removed) * 1000) / fontSize : 0;
+      const kern = size ? ((advanceOf(mod.insert, size) - removed) * 1000) / size : 0;
       const pad = Math.abs(kern) > 0.01;
+      if (mod.restyle) endSegment();
       if (mod.alignRight && pad) {
         flush();
         elems.push(fmt(kern));
@@ -601,6 +630,19 @@ function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
       if (!mod.alignRight && pad) {
         flush();
         elems.push(fmt(kern));
+      }
+      if (mod.restyle) {
+        const pre: string[] = [];
+        const post: string[] = [];
+        if (mod.restyle.fontSize !== undefined) {
+          pre.push(`/${show.fontName} ${fmt(size)} Tf`);
+          post.push(`/${show.fontName} ${fmt(fontSize)} Tf`);
+        }
+        if (mod.restyle.color) {
+          pre.push(`${mod.restyle.color.map(fmt).join(" ")} rg`);
+          post.push(show.fillOps || "0 g");
+        }
+        endSegment(pre.join(" ") + " ", " " + post.join(" "));
       }
       a = mod.to;
       continue;
@@ -611,12 +653,12 @@ function rebuildShowOp(show: ShowOp, mods: Mod[]): string {
       elems.push(fmt(atom.kern));
     } else chunk.push(atom.code);
   }
-  flush();
+  endSegment();
 
-  const tj = `[${elems.join(" ")}] TJ`;
-  if (show.op.op === "'") return `T* ${tj}`;
-  if (show.op.op === '"') return `${fmt(show.wordSpacing)} Tw ${fmt(show.charSpacing)} Tc T* ${tj}`;
-  return tj;
+  const body = segments.join(" ") || "[] TJ";
+  if (show.op.op === "'") return `T* ${body}`;
+  if (show.op.op === '"') return `${fmt(show.wordSpacing)} Tw ${fmt(show.charSpacing)} Tc T* ${body}`;
+  return body;
 }
 
 const norm = (s: string) => s.normalize("NFKC").replace(/\s+/g, "");
@@ -709,7 +751,7 @@ export function editPageText(
     for (const [code, uni] of font.toUnicode) {
       if (!available.has(uni) && (!font.embedded || font.usedCodes.has(code))) available.set(uni, code);
     }
-    let encodable = font.supported;
+    let encodable = font.supported && !edit.forceFallback;
     for (const ch of edit.newText) {
       const code = available.get(ch) ?? (ch === "\u00a0" ? available.get(" ") : undefined);
       if (code === undefined) {
@@ -724,17 +766,28 @@ export function editPageText(
     const alignRight =
       glyphs[best.end].show === startShow && isRightAligned(startShow, startAtom.x, endAtom.ex);
 
+    const wantsSize = edit.size !== undefined && startShow.size > 0 && Math.abs(edit.size - startShow.size) > 0.05;
+    const restyle =
+      encodable && (wantsSize || edit.color)
+        ? {
+            fontSize: wantsSize ? (startShow.fontSize * edit.size!) / startShow.size : undefined,
+            color: edit.color,
+          }
+        : undefined;
+
     for (let k = best.start; k <= best.end; k++) used[k] = true;
     let k = best.start;
     while (k <= best.end) {
       const { show } = glyphs[k];
       let last = k;
       while (last + 1 <= best.end && glyphs[last + 1].show === show) last++;
+      const first = k === best.start;
       addMod(show, {
-        from: k === best.start ? glyphs[k].atom : 0,
+        from: first ? glyphs[k].atom : 0,
         to: glyphs[last].atom,
-        insert: k === best.start && encodable ? codes : [],
+        insert: first && encodable ? codes : [],
         alignRight,
+        restyle: first ? restyle : undefined,
       });
       k = last + 1;
     }

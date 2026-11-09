@@ -1,13 +1,26 @@
-import { PDFDocument, StandardFonts, degrees, rgb } from "@cantoo/pdf-lib";
-import type { TextItem, PageData, Rect, ColoroutBox } from "./types";
+import {
+  LineCapStyle,
+  PDFArray,
+  PDFDict,
+  PDFDocument,
+  PDFName,
+  PDFNumber,
+  PDFString,
+  StandardFonts,
+  degrees,
+  rgb,
+  type PDFFont,
+  type PDFPage,
+} from "@cantoo/pdf-lib";
+import fontkit from "@cantoo/fontkit";
+import type { CustomFont, DocState, Rect, TextStyle } from "./types";
 import { editPageText, type FallbackDraw, type InPlaceEdit } from "./pdf-text-edit";
+import { safeLinkUrl } from "./links";
 
-function hexToRgb(hex: string) {
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-  return rgb(r, g, b);
+function hexToTuple(hex: string): [number, number, number] {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
 }
+const hexToRgb = (hex: string) => rgb(...hexToTuple(hex));
 
 const SERIF_KEYWORDS = [
   "times", "georgia", "palatino", "garamond", "bookman", "century schoolbook",
@@ -55,14 +68,18 @@ const CHAR_FALLBACKS: Record<string, string> = {
   "\u00a0": " ", "\u2002": " ", "\u2003": " ", "\u2009": " ", "\t": " ",
 };
 
+const LINE_HEIGHT = 1.2;
+
+interface ApplyOptions {
+  customFonts?: CustomFont[];
+  /** Only apply edits to existing text (used for the live preview). */
+  textOnly?: boolean;
+}
+
 export async function applyEdits(
   originalPdfBytes: ArrayBuffer,
-  pages: PageData[],
-  editedItems: Map<string, TextItem>,
-  newItems: TextItem[],
-  scale: number,
-  colorouts: ColoroutBox[] = [],
-  crops: Map<number, Rect> = new Map()
+  doc: DocState,
+  { customFonts = [], textOnly = false }: ApplyOptions = {}
 ): Promise<Uint8Array> {
   let pdfDoc: PDFDocument;
   try {
@@ -74,24 +91,40 @@ export async function applyEdits(
     }
     throw err;
   }
+  pdfDoc.registerFontkit(fontkit);
   const pdfPages = pdfDoc.getPages();
+  const pageAt = (i: number) => (i < pdfPages.length ? pdfPages[i] : null);
 
-  // Editor rects are top-left based and relative to the visible (crop) box
+  // Editor geometry is top-left based and relative to the visible (crop) box
   const visibleBoxes = pdfPages.map((page) => page.getCropBox());
-  const toPdfRect = (pageIndex: number, r: Rect) => {
+  const toPdfPoint = (pageIndex: number, x: number, y: number) => {
     const box = visibleBoxes[pageIndex];
-    return { x: box.x + r.x, y: box.y + box.height - r.y - r.height, width: r.width, height: r.height };
+    return { x: box.x + x, y: box.y + box.height - y };
+  };
+  const toPdfRect = (pageIndex: number, r: Rect) => {
+    const p = toPdfPoint(pageIndex, r.x, r.y + r.height);
+    return { x: p.x, y: p.y, width: r.width, height: r.height };
   };
 
   // Must run before anything is drawn: drawing wraps the original content streams
   const inPlace = new Set<string>();
   const fallbacks: (FallbackDraw & { pageIndex: number })[] = [];
   const editsByPage = new Map<number, InPlaceEdit[]>();
-  for (const [id, item] of editedItems) {
-    if (item.pageIndex >= pdfPages.length || item.pdfX === undefined || item.pdfY === undefined) continue;
-    const list = editsByPage.get(item.pageIndex) ?? [];
-    list.push({ id, pdfX: item.pdfX, pdfY: item.pdfY, originalText: item.originalText ?? "", newText: item.text });
-    editsByPage.set(item.pageIndex, list);
+  for (const [id, edit] of Object.entries(doc.textEdits)) {
+    const { run, style = {} } = edit;
+    if (!pageAt(run.pageIndex)) continue;
+    const list = editsByPage.get(run.pageIndex) ?? [];
+    list.push({
+      id,
+      pdfX: run.pdfX,
+      pdfY: run.pdfY,
+      originalText: run.text,
+      newText: edit.text,
+      size: style.fontSize,
+      color: style.color ? hexToTuple(style.color) : undefined,
+      forceFallback: style.fontFamily !== undefined || style.bold !== undefined || style.italic !== undefined,
+    });
+    editsByPage.set(run.pageIndex, list);
   }
   for (const [pageIndex, edits] of editsByPage) {
     try {
@@ -103,28 +136,24 @@ export async function applyEdits(
     }
   }
 
-  for (const box of colorouts) {
-    if (box.pageIndex >= pdfPages.length) continue;
-    pdfPages[box.pageIndex].drawRectangle({
-      ...toPdfRect(box.pageIndex, box),
-      color: hexToRgb(box.color ?? "#ffffff"),
-    });
-  }
-
-  type EmbeddedFont = Awaited<ReturnType<typeof pdfDoc.embedFont>>;
-  const fontCache: Record<string, EmbeddedFont> = {};
-
+  const fontCache = new Map<string, PDFFont>();
   async function getFont(family: string, bold?: boolean, italic?: boolean) {
-    const key = mapFontFamily(family, bold, italic);
-    if (!fontCache[key]) {
-      fontCache[key] = await pdfDoc.embedFont(StandardFonts[key]);
+    const custom = customFonts.find((f) => f.name === family);
+    const key = custom ? `custom:${custom.name}` : mapFontFamily(family, bold, italic);
+    if (!fontCache.has(key)) {
+      fontCache.set(
+        key,
+        custom
+          ? await pdfDoc.embedFont(custom.bytes, { subset: true })
+          : await pdfDoc.embedFont(StandardFonts[key as keyof typeof StandardFonts])
+      );
     }
-    return fontCache[key];
+    return fontCache.get(key)!;
   }
 
   // Standard fonts only cover WinAnsi; drawText throws on anything else
-  const charsetCache = new Map<EmbeddedFont, Set<number>>();
-  function toEncodable(text: string, font: EmbeddedFont) {
+  const charsetCache = new Map<PDFFont, Set<number>>();
+  function toEncodable(text: string, font: PDFFont) {
     let charset = charsetCache.get(font);
     if (!charset) {
       charset = new Set(font.getCharacterSet());
@@ -139,11 +168,17 @@ export async function applyEdits(
   }
 
   for (const f of fallbacks) {
-    const font = await getFont(f.baseFont, /bold|black|heavy|semibold/i.test(f.baseFont), /italic|oblique/i.test(f.baseFont));
+    const style = doc.textEdits[f.id]?.style ?? {};
+    const font = await getFont(
+      style.fontFamily ?? f.baseFont,
+      style.bold ?? /bold|black|heavy|semibold/i.test(f.baseFont),
+      style.italic ?? /italic|oblique/i.test(f.baseFont)
+    );
+    const size = style.fontSize ?? f.size;
     const text = toEncodable(f.text, font);
     let { x, y } = f;
     if (f.rightEdge) {
-      const width = font.widthOfTextAtSize(text, f.size);
+      const width = font.widthOfTextAtSize(text, size);
       const angle = (f.rotation * Math.PI) / 180;
       x = f.rightEdge.x - width * Math.cos(angle);
       y = f.rightEdge.y - width * Math.sin(angle);
@@ -151,66 +186,174 @@ export async function applyEdits(
     pdfPages[f.pageIndex].drawText(text, {
       x,
       y,
-      size: f.size,
+      size,
       font,
-      color: rgb(...f.color),
+      color: style.color ? hexToRgb(style.color) : rgb(...f.color),
       rotate: degrees(f.rotation),
     });
   }
 
   // Text not found in the content stream (e.g. invisible OCR text over a scan) can only be covered
-  for (const [id, item] of editedItems) {
-    if (item.pageIndex >= pdfPages.length || inPlace.has(id)) continue;
-    const page = pdfPages[item.pageIndex];
-    const { height: pageHeight } = page.getSize();
-
-    const pdfX = item.x / scale;
-    const pdfY = pageHeight - item.y / scale - item.height / scale;
-    const pdfWidth = item.width / scale;
-    const pdfHeight = item.height / scale;
-
-    page.drawRectangle({
-      x: pdfX - 1,
-      y: pdfY - 2,
-      width: pdfWidth + 2,
-      height: pdfHeight + 4,
-      color: rgb(1, 1, 1),
-    });
-
-    const font = await getFont(item.fontFamily, item.isBold, item.isItalic);
-    page.drawText(toEncodable(item.text, font), {
-      x: pdfX,
-      y: pdfY,
-      size: item.fontSize,
-      font,
-      color: hexToRgb(item.color),
+  for (const [id, edit] of Object.entries(doc.textEdits)) {
+    const { run } = edit;
+    const page = pageAt(run.pageIndex);
+    if (!page || inPlace.has(id)) continue;
+    const r = toPdfRect(run.pageIndex, run);
+    page.drawRectangle({ x: r.x - 1, y: r.y - 2, width: r.width + 2, height: r.height + 4, color: rgb(1, 1, 1) });
+    const style: TextStyle = {
+      fontFamily: run.fontFamily, fontSize: run.fontSize, color: "#000000", bold: false, italic: false,
+      ...edit.style,
+    };
+    const font = await getFont(style.fontFamily, style.bold, style.italic);
+    const base = toPdfPoint(run.pageIndex, run.x, run.y + run.fontSize);
+    page.drawText(toEncodable(edit.text, font), {
+      x: base.x, y: base.y, size: style.fontSize, font, color: hexToRgb(style.color),
     });
   }
 
-  for (const item of newItems) {
-    if (item.pageIndex >= pdfPages.length) continue;
-    const page = pdfPages[item.pageIndex];
-    const { height: pageHeight } = page.getSize();
-
-    const pdfX = item.x / scale;
-    const pdfY = pageHeight - item.y / scale - item.fontSize;
-
-    const font = await getFont(item.fontFamily, item.isBold, item.isItalic);
-    page.drawText(toEncodable(item.text, font), {
-      x: pdfX,
-      y: pdfY,
-      size: item.fontSize,
-      font,
-      color: hexToRgb(item.color),
-    });
-  }
-
-  for (const [pageIndex, rect] of crops) {
-    if (pageIndex >= pdfPages.length) continue;
-    const { x, y, width, height } = toPdfRect(pageIndex, rect);
-    pdfPages[pageIndex].setMediaBox(x, y, width, height);
-    pdfPages[pageIndex].setCropBox(x, y, width, height);
+  if (!textOnly) {
+    editExistingLinks(pdfDoc, doc);
+    for (const obj of doc.objects) {
+      const page = pageAt(obj.pageIndex);
+      if (!page) continue;
+      await drawObject(page, obj);
+    }
+    for (const [key, rect] of Object.entries(doc.crops)) {
+      const pageIndex = Number(key);
+      if (!pageAt(pageIndex)) continue;
+      const { x, y, width, height } = toPdfRect(pageIndex, rect);
+      pdfPages[pageIndex].setMediaBox(x, y, width, height);
+      pdfPages[pageIndex].setCropBox(x, y, width, height);
+    }
   }
 
   return pdfDoc.save();
+
+  async function drawObject(page: PDFPage, obj: DocState["objects"][number]) {
+    const pageIndex = obj.pageIndex;
+    switch (obj.kind) {
+      case "colorout":
+        page.drawRectangle({ ...toPdfRect(pageIndex, obj), color: hexToRgb(obj.color) });
+        return;
+      case "text": {
+        const { style } = obj;
+        const font = await getFont(style.fontFamily, style.bold, style.italic);
+        const lineHeight = style.fontSize * LINE_HEIGHT;
+        // Matches where the browser puts the baseline inside a line box of the same height
+        const ascent = font.heightAtSize(style.fontSize, { descender: false });
+        const full = font.heightAtSize(style.fontSize);
+        const firstBaseline = obj.y + (lineHeight - full) / 2 + ascent;
+        toEncodable(obj.text, font).split("\n").forEach((line, i) => {
+          const p = toPdfPoint(pageIndex, obj.x, firstBaseline + i * lineHeight);
+          page.drawText(line, { x: p.x, y: p.y, size: style.fontSize, font, color: hexToRgb(style.color) });
+        });
+        return;
+      }
+      case "image": {
+        const bytes = dataUrlToBytes(obj.src);
+        const image = obj.src.startsWith("data:image/png")
+          ? await pdfDoc.embedPng(bytes)
+          : await pdfDoc.embedJpg(bytes);
+        page.drawImage(image, { ...toPdfRect(pageIndex, obj), opacity: obj.opacity });
+        return;
+      }
+      case "rect":
+      case "ellipse": {
+        const r = toPdfRect(pageIndex, obj);
+        const paint = {
+          color: obj.fill ? hexToRgb(obj.fill) : undefined,
+          borderColor: obj.stroke ? hexToRgb(obj.stroke) : undefined,
+          borderWidth: obj.stroke ? obj.strokeWidth : 0,
+          opacity: obj.opacity,
+          borderOpacity: obj.opacity,
+        };
+        if (obj.kind === "rect") page.drawRectangle({ ...r, ...paint });
+        else page.drawEllipse({ x: r.x + r.width / 2, y: r.y + r.height / 2, xScale: r.width / 2, yScale: r.height / 2, ...paint });
+        return;
+      }
+      case "line":
+      case "arrow": {
+        const start = toPdfPoint(pageIndex, obj.x1, obj.y1);
+        let end = toPdfPoint(pageIndex, obj.x2, obj.y2);
+        const color = hexToRgb(obj.stroke);
+        if (obj.kind === "arrow") {
+          const head = Math.max(6, obj.strokeWidth * 4);
+          const angle = Math.atan2(end.y - start.y, end.x - start.x);
+          const tip = end;
+          const left = { x: tip.x - head * Math.cos(angle - 0.45), y: tip.y - head * Math.sin(angle - 0.45) };
+          const right = { x: tip.x - head * Math.cos(angle + 0.45), y: tip.y - head * Math.sin(angle + 0.45) };
+          // drawSvgPath flips y, so negate it to pass absolute page coordinates
+          page.drawSvgPath(`M ${tip.x} ${-tip.y} L ${left.x} ${-left.y} L ${right.x} ${-right.y} Z`, {
+            x: 0, y: 0, color, opacity: obj.opacity, borderWidth: 0,
+          });
+          end = { x: tip.x - head * 0.8 * Math.cos(angle), y: tip.y - head * 0.8 * Math.sin(angle) };
+        }
+        page.drawLine({ start, end, thickness: obj.strokeWidth, color, opacity: obj.opacity, lineCap: LineCapStyle.Round });
+        return;
+      }
+      case "link": {
+        const r = toPdfRect(pageIndex, obj);
+        const action = linkAction(obj.url, obj.page);
+        if (!action) return;
+        const annot = pdfDoc.context.obj({
+          Type: "Annot",
+          Subtype: "Link",
+          Rect: [r.x, r.y, r.x + r.width, r.y + r.height],
+          Border: [0, 0, 0],
+        });
+        Object.entries(action).forEach(([k, v]) => annot.set(PDFName.of(k), v));
+        page.node.addAnnot(pdfDoc.context.register(annot));
+        return;
+      }
+    }
+  }
+
+  function linkAction(url?: string, targetPage?: number): Record<string, PDFDict | PDFArray> | null {
+    const safe = url ? safeLinkUrl(url) : null;
+    if (safe) {
+      return { A: pdfDoc.context.obj({ Type: "Action", S: "URI", URI: PDFString.of(safe) }) };
+    }
+    const target = targetPage !== undefined ? pageAt(targetPage - 1) : null;
+    if (target) return { Dest: pdfDoc.context.obj([target.ref, PDFName.of("Fit")]) };
+    return null;
+  }
+
+  function editExistingLinks(pdf: PDFDocument, state: DocState) {
+    const byPage = new Map<number, DocState["linkEdits"][string][]>();
+    for (const edit of Object.values(state.linkEdits)) {
+      byPage.set(edit.link.pageIndex, [...(byPage.get(edit.link.pageIndex) ?? []), edit]);
+    }
+    for (const [pageIndex, edits] of byPage) {
+      const page = pageAt(pageIndex);
+      const annots = page?.node.Annots();
+      if (!page || !annots) continue;
+      const num = (v: unknown) => (v instanceof PDFNumber ? v.asNumber() : NaN);
+      for (let i = annots.size() - 1; i >= 0; i--) {
+        const annot = annots.lookup(i);
+        if (!(annot instanceof PDFDict) || annot.lookup(PDFName.of("Subtype"))?.toString() !== "/Link") continue;
+        const rect = annot.lookup(PDFName.of("Rect"));
+        if (!(rect instanceof PDFArray)) continue;
+        const values = rect.asArray().map((v) => num(pdf.context.lookup(v)));
+        const edit = edits.find((e) => e.link.pdfRect.every((v, k) => Math.abs(v - values[k]) < 0.5));
+        if (!edit) continue;
+        if (edit.deleted) {
+          annots.remove(i);
+          continue;
+        }
+        const action = linkAction(edit.url, edit.page);
+        if (!action) continue;
+        annot.delete(PDFName.of("A"));
+        annot.delete(PDFName.of("Dest"));
+        Object.entries(action).forEach(([k, v]) => annot.set(PDFName.of(k), v));
+      }
+    }
+  }
+}
+
+function dataUrlToBytes(dataUrl: string) {
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
