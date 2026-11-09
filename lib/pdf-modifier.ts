@@ -16,6 +16,7 @@ import fontkit from "@cantoo/fontkit";
 import type { CustomFont, DocState, Rect, TextStyle } from "./types";
 import { editPageText, type FallbackDraw, type InPlaceEdit } from "./pdf-text-edit";
 import { safeLinkUrl } from "./links";
+import { bundledFontFor, isItalicName, weightOf } from "./font-match";
 
 function hexToTuple(hex: string): [number, number, number] {
   return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
@@ -74,12 +75,27 @@ interface ApplyOptions {
   customFonts?: CustomFont[];
   /** Only apply edits to existing text (used for the live preview). */
   textOnly?: boolean;
+  /** Loads a file from public/fonts; returns null when unavailable. */
+  fetchFont?: (file: string) => Promise<ArrayBuffer | null>;
+}
+
+const bundledCache = new Map<string, Promise<ArrayBuffer | null>>();
+function fetchBundledFont(file: string) {
+  if (typeof window === "undefined") return Promise.resolve(null);
+  if (!bundledCache.has(file)) {
+    const request = fetch(`/fonts/${file}`)
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .catch(() => null);
+    request.then((bytes) => bytes || bundledCache.delete(file));
+    bundledCache.set(file, request);
+  }
+  return bundledCache.get(file)!;
 }
 
 export async function applyEdits(
   originalPdfBytes: ArrayBuffer,
   doc: DocState,
-  { customFonts = [], textOnly = false }: ApplyOptions = {}
+  { customFonts = [], textOnly = false, fetchFont = fetchBundledFont }: ApplyOptions = {}
 ): Promise<Uint8Array> {
   let pdfDoc: PDFDocument;
   try {
@@ -151,6 +167,18 @@ export async function applyEdits(
     return fontCache.get(key)!;
   }
 
+  // Redraws keep the original family and weight when we ship a full copy of that font
+  async function getMatchingFont(baseFont: string, bold?: boolean, italic?: boolean) {
+    const file = bundledFontFor(baseFont, { bold, italic });
+    const key = `bundled:${file}`;
+    if (file && !fontCache.has(key)) {
+      const bytes = await fetchFont(file);
+      if (bytes) fontCache.set(key, await pdfDoc.embedFont(bytes, { subset: true }));
+    }
+    if (file && fontCache.has(key)) return fontCache.get(key)!;
+    return getFont(baseFont, bold ?? weightOf(baseFont) >= 600, italic ?? isItalicName(baseFont));
+  }
+
   // Standard fonts only cover WinAnsi; drawText throws on anything else
   const charsetCache = new Map<PDFFont, Set<number>>();
   function toEncodable(text: string, font: PDFFont) {
@@ -169,11 +197,9 @@ export async function applyEdits(
 
   for (const f of fallbacks) {
     const style = doc.textEdits[f.id]?.style ?? {};
-    const font = await getFont(
-      style.fontFamily ?? f.baseFont,
-      style.bold ?? /bold|black|heavy|semibold/i.test(f.baseFont),
-      style.italic ?? /italic|oblique/i.test(f.baseFont)
-    );
+    const font = style.fontFamily
+      ? await getFont(style.fontFamily, style.bold, style.italic)
+      : await getMatchingFont(f.baseFont, style.bold, style.italic);
     const size = style.fontSize ?? f.size;
     const text = toEncodable(f.text, font);
     let { x, y } = f;
